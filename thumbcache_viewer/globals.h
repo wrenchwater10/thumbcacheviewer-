@@ -50,6 +50,8 @@
 #define MIN_WIDTH			640
 #define MIN_HEIGHT			480
 
+#define SPLITTER_WIDTH		6		// Width of the draggable splitter between the list and the preview pane.
+
 #define NUM_COLUMNS			11
 
 #define WM_DPICHANGED		0x02E0
@@ -140,6 +142,7 @@ LRESULT CALLBACK ScanWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam 
 LRESULT CALLBACK ScanTabWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam );
 LRESULT CALLBACK InfoWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam );
 LRESULT CALLBACK PropertyWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam );
+LRESULT CALLBACK SplitterWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam );
 
 VOID CALLBACK TimerProc( HWND hWnd, UINT msg, UINT idTimer, DWORD dwTime );
 
@@ -147,7 +150,8 @@ VOID CALLBACK TimerProc( HWND hWnd, UINT msg, UINT idTimer, DWORD dwTime );
 
 // Object handles.
 extern HWND g_hWnd_main;			// Handle to our main window.
-extern HWND g_hWnd_image;			// Handle to our image window.
+extern HWND g_hWnd_image;			// Handle to our image window (the preview pane inside the main window).
+extern HWND g_hWnd_splitter;		// Handle to the splitter between the list and the preview pane.
 extern HWND g_hWnd_scan;			// Handle to our scan window.
 extern HWND g_hWnd_info;			// Handle to our information window.
 extern HWND g_hWnd_property;		// Handle to our property window.
@@ -183,6 +187,9 @@ extern POINT drag_rect;				// The current position of gdi_image in the image win
 extern POINT old_pos;				// The old position of gdi_image. Used to calculate the rate of change.
 
 extern float scale;					// Scale of the image.
+extern float zoom_step;				// Increment used when zooming in and out.
+
+extern int preview_width;			// Width of the preview pane in the main window's client area.
 
 // List variables
 extern bool hide_blank_entries;		// Hide blank entries.

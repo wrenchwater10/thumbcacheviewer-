@@ -39,12 +39,16 @@
 #define MENU_PROP_VALUE	1013
 #define MENU_COPY_SEL	1014
 #define MENU_HOME_PAGE	1015
+#define MENU_COPY_IMAGE		1016	// Copy the selected image to the clipboard.
+#define MENU_EXPORT_IMAGE	1017	// Save the selected image to a file.
+#define MENU_SETTINGS		1018	// Show the settings dialog.
 
 #define UM_DISABLE			0
 #define UM_ENABLE			1
 #define UM_DISABLE_OVERRIDE	2
 
 void UpdateMenus( unsigned char action );
+void ShowSettingsDialog( HWND hOwner );
 void CreateMenus();
 
 extern HMENU g_hMenu;				// Handle to our menu bar.

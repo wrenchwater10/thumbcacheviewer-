@@ -40,6 +40,8 @@ unsigned __stdcall verify_checksums( void *pArguments );
 unsigned __stdcall save_csv( void *pArguments );
 unsigned __stdcall save_items( void *pArguments );
 unsigned __stdcall copy_items( void *pArguments );
+void CopyImageToClipboard();
+void ExportSelectedImage();
 
 wchar_t *GetExtensionFromFilename( wchar_t *filename, unsigned long length );
 wchar_t *GetFilenameFromPath( wchar_t *path, unsigned long length );

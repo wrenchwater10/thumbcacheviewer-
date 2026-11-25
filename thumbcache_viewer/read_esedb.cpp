@@ -548,7 +548,8 @@ JET_ERR InitESEDBInfo( wchar_t *database_filepath, unsigned long revision, unsig
 
 	// The following Jet functions don't have Unicode support on XP (our minimum compatibility) or below.
 	// Putting the database in the root directory (along with a Unicode filename) would get around the issue.
-	int filepath_length = WideCharToMultiByte( CP_ACP, 0, database_filepath, -1, NULL, 0, NULL, NULL );
+	int filepath_length;
+	filepath_length = WideCharToMultiByte( CP_ACP, 0, database_filepath, -1, NULL, 0, NULL, NULL );
 	g_ascii_filepath = ( char * )malloc( sizeof( char ) * filepath_length ); // Size includes the null character.
 	WideCharToMultiByte( CP_ACP, 0, database_filepath, -1, g_ascii_filepath, filepath_length, NULL, NULL );
 

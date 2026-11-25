@@ -18,6 +18,7 @@
 
 #include "globals.h"
 #include "utilities.h"
+#include "menus.h"
 
 #include "lite_user32.h"
 
@@ -25,6 +26,7 @@
 
 #define IDT_TIMER		2001
 
+#define MIN_SCALE_SIZE	0.1f
 #define MAX_SCALE_SIZE	25.0f
 
 // Window variables
@@ -33,10 +35,12 @@ int cy_i = 0;				// Current y (top) position of the image window based on the mo
 
 bool mouse_r_down = false;	// Toggled when the right mouse button is down.
 bool mouse_l_down = false;	// Toggled when the right mouse button is down.
+bool rb_zoomed = false;		// Toggled when the current right button press performed a zoom.
 
 // Image variables
 PAINTSTRUCT ps = { NULL };	// The paint structure used to draw on the image window.
 float scale = 1.0f;			// Scale of the image.
+float zoom_step = 0.5f;		// Increment used when zooming in and out. Adjustable in Tools -> Settings.
 
 POINT drag_rect = { 0 };	// The current position of gdi_image in the image window.
 POINT old_pos = { 0 };		// The old position of gdi_image. Used to calculate the rate of change.
@@ -83,10 +87,10 @@ LRESULT CALLBACK ImageWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 				case VK_OEM_PLUS:
 				{
 					// Zoom in.
-					scale += 0.5f;
-					if ( scale < 1.0f )
+					scale += zoom_step;
+					if ( scale < MIN_SCALE_SIZE )
 					{
-						scale = 1.0f;
+						scale = MIN_SCALE_SIZE;
 					}
 					else if ( scale > MAX_SCALE_SIZE )
 					{
@@ -105,10 +109,10 @@ LRESULT CALLBACK ImageWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 				case VK_OEM_MINUS:
 				{
 					// Zoom out.
-					scale -= 0.5f;
-					if ( scale < 1.0f )
+					scale -= zoom_step;
+					if ( scale < MIN_SCALE_SIZE )
 					{
-						scale = 1.0f;
+						scale = MIN_SCALE_SIZE;
 					}
 					else if ( scale > MAX_SCALE_SIZE )
 					{
@@ -248,10 +252,10 @@ LRESULT CALLBACK ImageWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 		case WM_MOUSEWHEEL:
 		{
 			// Increment, or decrement our scale based on the scrollwheel change.
-			scale += 0.5f * ( GET_WHEEL_DELTA_WPARAM( wParam ) / WHEEL_DELTA );
-			if ( scale < 1.0f )
+			scale += zoom_step * ( GET_WHEEL_DELTA_WPARAM( wParam ) / WHEEL_DELTA );
+			if ( scale < MIN_SCALE_SIZE )
 			{
-				scale = 1.0f;
+				scale = MIN_SCALE_SIZE;
 			}
 			else if ( scale > MAX_SCALE_SIZE )
 			{
@@ -319,16 +323,19 @@ LRESULT CALLBACK ImageWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 
 		case WM_LBUTTONDOWN:
 		{
+			// Take the focus so the + and - zoom keys work while the preview pane is active.
+			SetFocus( hWnd );
+
 			mouse_l_down = true;
 
 			// See if the right mouse button is down.
 			if ( mouse_r_down )
 			{
 				// Zoom in.
-				scale += 0.5f;
-				if ( scale < 1.0f )
+				scale += zoom_step;
+				if ( scale < MIN_SCALE_SIZE )
 				{
-					scale = 1.0f;
+					scale = MIN_SCALE_SIZE;
 				}
 				else if ( scale > MAX_SCALE_SIZE )
 				{
@@ -337,6 +344,7 @@ LRESULT CALLBACK ImageWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 
 				timer_active = false;	// Allow the timer to reset.
 				zoom = true;
+				rb_zoomed = true;
 
 				// Redraw our image.
 				InvalidateRect( hWnd, NULL, TRUE );
@@ -361,16 +369,20 @@ LRESULT CALLBACK ImageWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 
 		case WM_RBUTTONDOWN:
 		{
+			// Take the focus so the + and - zoom keys work while the preview pane is active.
+			SetFocus( hWnd );
+
 			mouse_r_down = true;
+			rb_zoomed = false;
 
 			// See if the left mouse button is down.
 			if ( mouse_l_down )
 			{
 				// Zoom out.
-				scale -= 0.5f;
-				if ( scale < 1.0f )
+				scale -= zoom_step;
+				if ( scale < MIN_SCALE_SIZE )
 				{
-					scale = 1.0f;
+					scale = MIN_SCALE_SIZE;
 				}
 				else if ( scale > MAX_SCALE_SIZE )
 				{
@@ -379,6 +391,7 @@ LRESULT CALLBACK ImageWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 
 				timer_active = false;	// Allow the timer to reset.
 				zoom = true;
+				rb_zoomed = true;
 
 				// Redraw our image.
 				InvalidateRect( hWnd, NULL, TRUE );
@@ -390,6 +403,28 @@ LRESULT CALLBACK ImageWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 		case WM_RBUTTONUP:
 		{
 			mouse_r_down = false;
+
+			// Show the context menu, unless this right click was part of a zoom gesture.
+			if ( !rb_zoomed )
+			{
+				POINT p;
+				GetCursorPos( &p );
+
+				UpdateMenus( UM_ENABLE );
+
+				TrackPopupMenu( g_hMenuSub_context, TPM_RIGHTBUTTON, p.x, p.y, 0, hWnd, NULL );
+			}
+
+			rb_zoomed = false;
+
+			return 0;
+		}
+		break;
+
+		case WM_COMMAND:
+		{
+			// Context menu commands are handled by the main window.
+			SendMessage( g_hWnd_main, WM_COMMAND, wParam, lParam );
 			return 0;
 		}
 		break;
@@ -420,11 +455,12 @@ LRESULT CALLBACK ImageWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 		{
 			HDC hDC = BeginPaint( hWnd, &ps );
 
+			RECT rc;
+			GetClientRect( hWnd, &rc );
+
 			// Make sure we have an image to draw.
 			if ( gdi_image != NULL )
 			{
-				RECT rc;
-				GetClientRect( hWnd, &rc );
 
 				// Create a memory buffer to draw to.
 				HDC hdcMem = CreateCompatibleDC( hDC );
@@ -444,19 +480,19 @@ LRESULT CALLBACK ImageWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 				Gdiplus::Graphics graphics( hdcMem );
 					
 				// Draw the image on screen.
-				if ( scale > 1.0f || current_dpi_image > USER_DEFAULT_SCREEN_DPI )
+				if ( scale != 1.0f || current_dpi_image != USER_DEFAULT_SCREEN_DPI )
 				{
 					float scale2 = scale * current_dpi_image / USER_DEFAULT_SCREEN_DPI;
 
-					// Scale the image.
-					graphics.SetInterpolationMode( Gdiplus::InterpolationModeNearestNeighbor );
+					// Scale the image. Use a smoothing filter when the image is being shrunk.
+					graphics.SetInterpolationMode( ( scale2 < 1.0f ) ? Gdiplus::InterpolationModeHighQualityBicubic : Gdiplus::InterpolationModeNearestNeighbor );
 					graphics.ScaleTransform( scale2, scale2 );
 					// Whoa! This draws the image around its scaled center.
 					graphics.DrawImage( gdi_image, ( ( -drag_rect.x - ( ( gdi_image->GetWidth() / 2 ) * ( scale2 - 1 ) ) ) / scale2 ), ( ( -drag_rect.y - ( ( gdi_image->GetHeight() / 2 ) * ( scale2 - 1 ) ) ) / scale2 ) );
 				}
 				else
 				{
-					graphics.DrawImage( gdi_image, -drag_rect.x, -drag_rect.y );
+					graphics.DrawImage( gdi_image, ( INT )-drag_rect.x, ( INT )-drag_rect.y );
 				}
 
 				// If the image has just been zoomed, display some text about it.
@@ -469,8 +505,8 @@ LRESULT CALLBACK ImageWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 						SetTimer( hWnd, IDT_TIMER, 5000, ( TIMERPROC )TimerProc );
 					}
 
-					char buf[ 20 ] = { 0 };
-					sprintf_s( buf, 20, " Zoom level: %4.1fx ", scale );
+					char buf[ 32 ] = { 0 };
+					sprintf_s( buf, 32, " Zoom level: %4.2fx ", scale );
 
 					HFONT ohf = ( HFONT )SelectObject( hdcMem, hFont_image );
 					DeleteObject( ohf );
@@ -483,6 +519,13 @@ LRESULT CALLBACK ImageWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 				// Draw our memory buffer to the main device context.
 				BitBlt( hDC, 0, 0, rc.right, rc.bottom, hdcMem, 0, 0, SRCCOPY );
 				DeleteDC( hdcMem );
+			}
+			else
+			{
+				// Nothing is selected. Fill the preview pane with our background color.
+				HBRUSH background = CreateSolidBrush( ( COLORREF )GetSysColor( COLOR_MENU ) );
+				FillRect( hDC, &rc, background );
+				DeleteObject( background );
 			}
 
 			EndPaint( hWnd, &ps );
@@ -501,145 +544,6 @@ LRESULT CALLBACK ImageWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 		}
 		break;*/
 
-		case WM_SYSCOMMAND:
-		{
-			// Capture the minimize call before the window gets minimized.
-			if ( wParam == SC_MINIMIZE )
-			{
-				// Save its dimensions.
-				GetClientRect( hWnd, &last_dim );
-			}
-			// Continue processing this, and all other system calls.
-			return DefWindowProc( hWnd, msg, wParam, lParam );
-		}
-		break;
-
-		case WM_ENTERSIZEMOVE:
-		{
-			//Get the current position of our window before it gets moved.
-			RECT rc;
-			GetWindowRect( hWnd, &rc );
-
-			POINT cur_pos;
-			GetCursorPos( &cur_pos );
-			cx_i = cur_pos.x - rc.left;
-			cy_i = cur_pos.y - rc.top;
-
-			return 0;
-		}
-		break;
-
-		case WM_SIZE:
-		{
-			if ( wParam == SIZE_RESTORED )
-			{
-				// This will handle the case when the user moves the main window while the image window is minimized.
-				if ( is_attached )
-				{
-					RECT rc;
-					GetWindowRect( hWnd, &rc );
-					// Call the WM_MOVING callback with the current position of our window. Set wParam to -1 to tell WM_MOVING that we don't want to calculate the cursor position.
-					SendMessage( hWnd, WM_MOVING, ( WPARAM )-1, ( LPARAM )&rc );
-				}
-			}
-			else if ( wParam == SIZE_MAXIMIZED )
-			{
-				// We're no longer attached to the main window if we're maximized.
-				is_attached = false;
-				skip_main = false;
-			}
-			return 0;
-		}
-		break;
-
-		case WM_MOVING:
-		{
-			POINT cur_pos;
-			RECT wa;
-			RECT *rc = ( RECT * )lParam;
-
-			// WM_MOVING doesn't use wParam, but we set it in the WM_SIZE callback above so that rc isn't influenced by the cursor position.
-			if ( wParam != -1 )
-			{
-				GetCursorPos( &cur_pos );
-				OffsetRect( rc, cur_pos.x - ( rc->left + cx_i ), cur_pos.y - ( rc->top + cy_i ) );
-			}
-
-			GetWindowRect( g_hWnd_main, &wa );
-
-			is_attached = false;
-
-			if ( is_close( rc->right - g_border_width, wa.left + g_border_width ) )			// Attach to left side of main window.
-			{
-				// Allow it to snap only to the dimensions of the main window.
-				if ( ( rc->bottom > wa.top ) && ( rc->top < wa.bottom ) )
-				{
-					OffsetRect( rc, wa.left - rc->right + ( g_border_width * 2 ), 0 );
-					is_attached = true;
-				}
-			}
-			else if ( is_close( wa.right - g_border_width, rc->left + g_border_width ) )	// Attach to right side of main window.
-			{
-				// Allow it to snap only to the dimensions of the main window.
-				if ( ( rc->bottom > wa.top ) && ( rc->top < wa.bottom ) )
-				{
-					OffsetRect( rc, wa.right - rc->left - ( g_border_width * 2 ), 0 );
-					is_attached = true;
-				}
-			}
-
-			if ( is_close( rc->bottom - g_border_width, wa.top ) )			// Attach to top of main window.
-			{
-				// Allow it to snap only to the dimensions of the main window.
-				if ( ( rc->left < wa.right ) && ( rc->right > wa.left ) )
-				{
-					OffsetRect( rc, 0, wa.top - rc->bottom + g_border_width );
-					is_attached = true;
-				}
-			}
-			else if ( is_close( wa.bottom - g_border_width, rc->top ) )		// Attach to bottom of main window.
-			{
-				// Allow it to snap only to the dimensions of the main window.
-				if ( ( rc->left < wa.right ) && ( rc->right > wa.left ) )
-				{
-					OffsetRect( rc, 0, wa.bottom - rc->top - g_border_width );
-					is_attached = true;
-				}
-			}
-
-			// Allow our image window to attach to the edge of the desktop, but only if it's not already attached to the main window.
-			if ( !is_attached )
-			{
-				// The image window is no longer attached, so the main window can test if it attaches to this window.
-				skip_main = false;
-
-				HMONITOR hMon = MonitorFromWindow( hWnd, MONITOR_DEFAULTTONEAREST );
-				MONITORINFO mi;
-				mi.cbSize = sizeof( MONITORINFO );
-				GetMonitorInfo( hMon, &mi );
-
-				if ( is_close( rc->left + g_border_width, mi.rcWork.left ) )				// Attach to left side of the desktop.
-				{
-					OffsetRect( rc, mi.rcWork.left - rc->left - g_border_width, 0 );
-				}
-				else if ( is_close( mi.rcWork.right, rc->right - g_border_width ) )			// Attach to right side of the desktop.
-				{
-					OffsetRect( rc, mi.rcWork.right - rc->right + g_border_width, 0 );
-				}
-
-				if ( is_close( rc->top, mi.rcWork.top ) )									// Attach to top of the desktop.
-				{
-					OffsetRect( rc, 0, mi.rcWork.top - rc->top );
-				}
-				else if ( is_close( mi.rcWork.bottom, rc->bottom - g_border_width ) )		// Attach to bottom of the desktop.
-				{
-					OffsetRect( rc, 0, mi.rcWork.bottom - rc->bottom + g_border_width );
-				}
-			}
-			return TRUE;
-		}
-		break;
-
 		case WM_DPICHANGED:
 		{
 			//last_dpi_image = current_dpi_image;
@@ -649,21 +553,6 @@ LRESULT CALLBACK ImageWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam
 			DeleteObject( hFont_image );
 			hFont_image = hFont;
 
-			RECT *rc = ( RECT * )lParam;
-			SetWindowPos( hWnd, NULL, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top, SWP_NOZORDER | SWP_NOACTIVATE );
-
-			return 0;
-		}
-		break;
-
-		case WM_CLOSE:
-		{
-			// We're no longer attached to the main window if we're closed.
-			is_attached = false;
-			skip_main = false;
-
-			// Hide the window if we lose focus.
-			ShowWindow( hWnd, SW_HIDE );
 			return 0;
 		}
 		break;

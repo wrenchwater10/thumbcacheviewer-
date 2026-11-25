@@ -94,6 +94,25 @@ BEGIN
     END
 END
 
+/////////////////////////////////////////////////////////////////////////////
+//
+// Settings dialog
+//
+
+IDD_SETTINGS DIALOGEX 0, 0, 190, 96
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Settings"
+FONT 8, "MS Shell Dlg", 400, 0, 1
+BEGIN
+    CONTROL         "Zoom &increment:", -1, "Static", SS_LEFT, 8, 10, 60, 9
+    CONTROL         "", IDC_SETTINGS_ZOOM_STEP, "Edit", ES_LEFT | ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 72, 8, 40, 13
+    CONTROL         "Zooming is limited to 0.1x - 25x. The increment applies to "
+                    "the + and - keys, the mouse wheel, and the left + right click zoom.",
+                    IDC_SETTINGS_NOTE, "Static", SS_LEFT, 8, 28, 174, 32
+    CONTROL         "OK", IDOK, "Button", BS_DEFPUSHBUTTON | WS_TABSTOP, 76, 74, 50, 14
+    CONTROL         "Cancel", IDCANCEL, "Button", BS_PUSHBUTTON | WS_TABSTOP, 132, 74, 50, 14
+END
+
 #endif    // English (U.S.) resources
 /////////////////////////////////////////////////////////////////////////////
 

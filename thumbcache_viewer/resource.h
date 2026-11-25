@@ -3,6 +3,9 @@
 // Used by thumbcache_viewer.rc
 //
 #define IDI_ICON                        101
+#define IDD_SETTINGS                    102
+#define IDC_SETTINGS_ZOOM_STEP          1001
+#define IDC_SETTINGS_NOTE               1002
 
 // Next default values for new objects
 // 

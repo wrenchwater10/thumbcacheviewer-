@@ -360,12 +360,14 @@ void TraverseSQLiteDatabase( wchar_t *database_filepath )
 		"WHERE WorkId IN ( SELECT WorkId FROM SystemIndex_1_PropertyStore WHERE Value = (X\'", 288 );
 
 	// Get the number of items in the listview.
-	int item_count = ( int )SendMessage( g_hWnd_list, LVM_GETITEMCOUNT, 0, 0 );
+	int item_count;
+	item_count = ( int )SendMessage( g_hWnd_list, LVM_GETITEMCOUNT, 0, 0 );
 
 	memset( &lvi, 0, sizeof( LVITEM ) );
 	lvi.mask = LVIF_PARAM;
 
-	FILE_INFO *fi = NULL;
+	FILE_INFO *fi;
+	fi = NULL;
 
 	for ( lvi.iItem = 0; lvi.iItem < item_count; ++lvi.iItem )
 	{

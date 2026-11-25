@@ -136,6 +136,18 @@ int WINAPI WinMain( HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, LPSTR lpCm
 		goto CLEANUP;
 	}
 
+	// The splitter that resizes the preview pane.
+	wcex.lpfnWndProc    = SplitterWndProc;
+	wcex.lpszClassName  = L"splitter";
+	wcex.hCursor        = LoadCursor( NULL, IDC_SIZEWE );
+	wcex.hbrBackground  = ( HBRUSH )( COLOR_3DFACE + 1 );
+
+	if ( !RegisterClassEx( &wcex ) )
+	{
+		fail_type = 1;
+		goto CLEANUP;
+	}
+
 	g_hWnd_main = CreateWindow( L"thumbcache", PROGRAM_CAPTION, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 0, 0, NULL, NULL, NULL, NULL );
 
 	if ( !g_hWnd_main )
@@ -146,7 +158,8 @@ int WINAPI WinMain( HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, LPSTR lpCm
 
 	current_dpi_system = GetDpiForWindow( g_hWnd_main );
 
-	g_hWnd_image = CreateWindow( L"image", PROGRAM_CAPTION, WS_OVERLAPPEDWINDOW, ( ( GetSystemMetricsForDpi( SM_CXSCREEN, current_dpi_system ) - _SCALE_( MIN_WIDTH, dpi_system ) ) / 2 ), ( ( GetSystemMetricsForDpi( SM_CYSCREEN, current_dpi_system ) - _SCALE_( MIN_HEIGHT, dpi_system ) ) / 2 ), _SCALE_( MIN_HEIGHT, dpi_system ), _SCALE_( MIN_HEIGHT, dpi_system ), NULL, NULL, NULL, NULL );
+	// The image preview is a child of the main window. It sits in a pane on the right side of the client area.
+	g_hWnd_image = CreateWindow( L"image", PROGRAM_CAPTION, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0, 0, 0, g_hWnd_main, NULL, NULL, NULL );
 
 	if ( !g_hWnd_image )
 	{
@@ -291,7 +304,9 @@ int WINAPI WinMain( HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, LPSTR lpCm
 
 	if ( cmd_line == 0 || cmd_line == 1 )
 	{
-		SetWindowPos( g_hWnd_main, HWND_TOP, ( ( GetSystemMetricsForDpi( SM_CXSCREEN, current_dpi_system ) - _SCALE_( MIN_WIDTH, dpi_system ) ) / 2 ), ( ( GetSystemMetricsForDpi( SM_CYSCREEN, current_dpi_system ) - _SCALE_( MIN_HEIGHT, dpi_system ) ) / 2 ), _SCALE_( MIN_WIDTH, dpi_system ), _SCALE_( MIN_HEIGHT, dpi_system ), SWP_SHOWWINDOW );
+		// Open full screen (maximized) so the list and the preview pane fill the display.
+		ShowWindow( g_hWnd_main, SW_SHOWMAXIMIZED );
+		UpdateWindow( g_hWnd_main );
 	}
 
 	// Main message loop:

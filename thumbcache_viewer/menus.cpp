@@ -136,6 +136,16 @@ void CreateMenus()
 	mii.wID = MENU_SCAN;
 	InsertMenuItemA( hMenuSub_tools, 1, TRUE, &mii );
 
+	mii.fType = MFT_SEPARATOR;
+	InsertMenuItemA( hMenuSub_tools, 2, TRUE, &mii );
+
+	mii.fType = MFT_STRING;
+	mii.dwTypeData = "&Settings...";
+	mii.cch = 12;
+	mii.wID = MENU_SETTINGS;
+	mii.fState = MFS_ENABLED;
+	InsertMenuItemA( hMenuSub_tools, 3, TRUE, &mii );
+
 	// HELP MENU
 	mii.dwTypeData = "Thumbcache Viewer &Home Page";
 	mii.cch = 28;
@@ -182,46 +192,60 @@ void CreateMenus()
 	// CONTEXT MENU (for right click)
 	mii.fMask = MIIM_TYPE | MIIM_ID | MIIM_STATE;
 	mii.fState = MFS_DISABLED;
+	mii.dwTypeData = "Copy Image";
+	mii.cch = 10;
+	mii.wID = MENU_COPY_IMAGE;
+	InsertMenuItemA( g_hMenuSub_context, 0, TRUE, &mii );
+
+	mii.dwTypeData = "Export Image...";
+	mii.cch = 14;
+	mii.wID = MENU_EXPORT_IMAGE;
+	InsertMenuItemA( g_hMenuSub_context, 1, TRUE, &mii );
+
+	mii.fType = MFT_SEPARATOR;
+	InsertMenuItemA( g_hMenuSub_context, 2, TRUE, &mii );
+
+	mii.fType = MFT_STRING;
 	mii.dwTypeData = "Save Selected...";
 	mii.cch = 16;
 	mii.wID = MENU_SAVE_SEL;
-	InsertMenuItemA( g_hMenuSub_context, 0, TRUE, &mii );
+	InsertMenuItemA( g_hMenuSub_context, 3, TRUE, &mii );
 
 	mii.fType = MFT_SEPARATOR;
-	InsertMenuItemA( g_hMenuSub_context, 1, TRUE, &mii );
+	InsertMenuItemA( g_hMenuSub_context, 4, TRUE, &mii );
 
 	mii.fType = MFT_STRING;
 	mii.dwTypeData = "Remove Selected";
 	mii.cch = 15;
 	mii.wID = MENU_REMOVE_SEL;
-	InsertMenuItemA( g_hMenuSub_context, 2, TRUE, &mii );
+	InsertMenuItemA( g_hMenuSub_context, 5, TRUE, &mii );
 
 	mii.fType = MFT_SEPARATOR;
-	InsertMenuItemA( g_hMenuSub_context, 3, TRUE, &mii );
+	InsertMenuItemA( g_hMenuSub_context, 6, TRUE, &mii );
 
 	mii.fType = MFT_STRING;
 	mii.dwTypeData = "Copy Selected";
 	mii.cch = 13;
 	mii.wID = MENU_COPY_SEL;
-	InsertMenuItemA( g_hMenuSub_context, 4, TRUE, &mii );
+	InsertMenuItemA( g_hMenuSub_context, 7, TRUE, &mii );
 
 	mii.fType = MFT_SEPARATOR;
-	InsertMenuItemA( g_hMenuSub_context, 5, TRUE, &mii );
+	InsertMenuItemA( g_hMenuSub_context, 8, TRUE, &mii );
 
 	mii.fType = MFT_STRING;
 	mii.dwTypeData = "Select All";
 	mii.cch = 10;
 	mii.wID = MENU_SELECT_ALL;
-	InsertMenuItemA( g_hMenuSub_context, 6, TRUE, &mii );
+	InsertMenuItemA( g_hMenuSub_context, 9, TRUE, &mii );
 
 	mii.fType = MFT_SEPARATOR;
-	InsertMenuItemA( g_hMenuSub_context, 7, TRUE, &mii );
+	InsertMenuItemA( g_hMenuSub_context, 10, TRUE, &mii );
 
 	mii.fType = MFT_STRING;
 	mii.dwTypeData = "Extended Information";
 	mii.cch = 20;
 	mii.wID = MENU_INFO;
-	InsertMenuItemA( g_hMenuSub_context, 8, TRUE, &mii );
+	InsertMenuItemA( g_hMenuSub_context, 11, TRUE, &mii );
 
 	// EXTENDED INFO CONTEXT MENU (for right click)
 	mii.dwTypeData = "Copy Selected";
@@ -268,6 +292,8 @@ void UpdateMenus( unsigned char action )
 		EnableMenuItem( g_hMenu, MENU_CHECKSUMS, MF_DISABLED );
 		EnableMenuItem( g_hMenu, MENU_INFO, MF_DISABLED );
 		EnableMenuItem( g_hMenu, MENU_SCAN, MF_DISABLED );
+		EnableMenuItem( g_hMenuSub_context, MENU_COPY_IMAGE, MF_DISABLED );
+		EnableMenuItem( g_hMenuSub_context, MENU_EXPORT_IMAGE, MF_DISABLED );
 		EnableMenuItem( g_hMenuSub_context, MENU_SAVE_SEL, MF_DISABLED );
 		EnableMenuItem( g_hMenuSub_context, MENU_COPY_SEL, MF_DISABLED );
 		EnableMenuItem( g_hMenuSub_context, MENU_REMOVE_SEL, MF_DISABLED );
@@ -290,6 +316,8 @@ void UpdateMenus( unsigned char action )
 		EnableMenuItem( g_hMenu, MENU_COPY_SEL, type );
 		EnableMenuItem( g_hMenu, MENU_REMOVE_SEL, type );
 		EnableMenuItem( g_hMenu, MENU_INFO, type );
+		EnableMenuItem( g_hMenuSub_context, MENU_COPY_IMAGE, type );
+		EnableMenuItem( g_hMenuSub_context, MENU_EXPORT_IMAGE, type );
 		EnableMenuItem( g_hMenuSub_context, MENU_SAVE_SEL, type );
 		EnableMenuItem( g_hMenuSub_context, MENU_COPY_SEL, type );
 		EnableMenuItem( g_hMenuSub_context, MENU_REMOVE_SEL, type );
@@ -302,4 +330,79 @@ void UpdateMenus( unsigned char action )
 		EnableMenuItem( g_hMenu, MENU_OPEN, MF_ENABLED );
 		EnableMenuItem( g_hMenu, MENU_HIDE_BLANK, MF_ENABLED );
 	}
+}
+
+// Settings dialog. Lets the user change the zoom increment used by the image window.
+static INT_PTR CALLBACK SettingsDlgProc( HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam )
+{
+	switch ( msg )
+	{
+		case WM_INITDIALOG:
+		{
+			wchar_t buf[ 32 ] = { 0 };
+			swprintf_s( buf, 32, L"%.2f", ( double )zoom_step );
+			SetDlgItemTextW( hDlg, IDC_SETTINGS_ZOOM_STEP, buf );
+
+			SendDlgItemMessageW( hDlg, IDC_SETTINGS_ZOOM_STEP, EM_SETSEL, 0, -1 );
+			SetFocus( GetDlgItem( hDlg, IDC_SETTINGS_ZOOM_STEP ) );
+
+			return FALSE;	// We set the focus ourselves.
+		}
+		break;
+
+		case WM_COMMAND:
+		{
+			switch ( LOWORD( wParam ) )
+			{
+				case IDOK:
+				{
+					wchar_t buf[ 32 ] = { 0 };
+					GetDlgItemTextW( hDlg, IDC_SETTINGS_ZOOM_STEP, buf, 32 );
+
+					wchar_t *end = NULL;
+					double value = wcstod( buf, &end );
+
+					// Only accept a positive number (the leading whitespace is skipped by wcstod).
+					if ( end == buf || value <= 0.0 )
+					{
+						MessageBoxW( hDlg, L"Enter a zoom increment greater than 0 (for example 0.1).", PROGRAM_CAPTION, MB_APPLMODAL | MB_ICONWARNING );
+						SendDlgItemMessageW( hDlg, IDC_SETTINGS_ZOOM_STEP, EM_SETSEL, 0, -1 );
+						SetFocus( GetDlgItem( hDlg, IDC_SETTINGS_ZOOM_STEP ) );
+						return TRUE;
+					}
+
+					// Keep the increment within a usable range.
+					if ( value < 0.01 )
+					{
+						value = 0.01;
+					}
+					else if ( value > 10.0 )
+					{
+						value = 10.0;
+					}
+
+					zoom_step = ( float )value;
+
+					EndDialog( hDlg, IDOK );
+					return TRUE;
+				}
+				break;
+
+				case IDCANCEL:
+				{
+					EndDialog( hDlg, IDCANCEL );
+					return TRUE;
+				}
+				break;
+			}
+		}
+		break;
+	}
+
+	return FALSE;
+}
+
+void ShowSettingsDialog( HWND hOwner )
+{
+	DialogBoxParamW( GetModuleHandle( NULL ), MAKEINTRESOURCEW( IDD_SETTINGS ), hOwner, SettingsDlgProc, 0 );
 }

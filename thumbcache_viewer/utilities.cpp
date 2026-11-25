@@ -1608,6 +1608,428 @@ unsigned __stdcall save_items( void *pArguments )
 	return 0;
 }
 
+// Returns the FILE_INFO of the listview item that is both focused and selected, or NULL if there isn't one.
+static FILE_INFO *GetFocusedFileInfo()
+{
+	LVITEM lvi = { NULL };
+	lvi.mask = LVIF_PARAM;
+	lvi.iItem = ( int )SendMessage( g_hWnd_list, LVM_GETNEXTITEM, ( WPARAM )-1, LVNI_FOCUSED | LVNI_SELECTED );
+	if ( lvi.iItem == -1 )
+	{
+		return NULL;
+	}
+
+	SendMessage( g_hWnd_list, LVM_GETITEM, 0, ( LPARAM )&lvi );
+
+	return ( FILE_INFO * )lvi.lParam;
+}
+
+// Reads an item's stored image data from its database. The returned buffer must be freed.
+static char *ReadItemImageData( FILE_INFO *fi, DWORD *size )
+{
+	*size = 0;
+
+	if ( fi == NULL || fi->size == 0 || fi->si == NULL )
+	{
+		return NULL;
+	}
+
+	char *buffer = ( char * )malloc( sizeof( char ) * fi->size );
+	if ( buffer == NULL )
+	{
+		return NULL;
+	}
+
+	// Attempt to open a file for reading.
+	HANDLE hFile = CreateFile( fi->si->dbpath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+	if ( hFile == INVALID_HANDLE_VALUE )
+	{
+		free( buffer );
+		return NULL;
+	}
+
+	DWORD read = 0;
+	// Set our file pointer to the beginning of the image data.
+	SetFilePointer( hFile, fi->data_offset, 0, FILE_BEGIN );
+	// Read the entire image into memory.
+	ReadFile( hFile, buffer, fi->size, &read, NULL );
+	CloseHandle( hFile );
+
+	*size = read;
+
+	return buffer;
+}
+
+// Decodes an item's stored image with GDI+. The returned image must be deleted.
+static Gdiplus::Image *CreateImageFromItem( FILE_INFO *fi )
+{
+	DWORD size = 0;
+	char *buffer = ReadItemImageData( fi, &size );
+	if ( buffer == NULL )
+	{
+		return NULL;
+	}
+
+	if ( size == 0 )
+	{
+		free( buffer );
+		return NULL;
+	}
+
+	// Create a stream to store our buffer and then store the stream into a GDI+ image object.
+	IStream *is = NULL;
+	if ( CreateStreamOnHGlobal( NULL, TRUE, &is ) != S_OK )
+	{
+		free( buffer );
+		return NULL;
+	}
+
+	ULONG written = 0;
+	is->Write( buffer, size, &written );
+	free( buffer );
+
+	Gdiplus::Image *image = new Gdiplus::Image( is );
+	is->Release();
+
+	if ( image->GetLastStatus() != Gdiplus::Ok )
+	{
+		delete image;
+		return NULL;
+	}
+
+	return image;
+}
+
+// Finds the CLSID of the GDI+ encoder that handles the given MIME type.
+static bool GetEncoderClsid( const wchar_t *mime_type, CLSID *clsid )
+{
+	UINT num = 0;
+	UINT size = 0;
+	Gdiplus::GetImageEncodersSize( &num, &size );
+	if ( size == 0 )
+	{
+		return false;
+	}
+
+	Gdiplus::ImageCodecInfo *codec_info = ( Gdiplus::ImageCodecInfo * )malloc( size );
+	if ( codec_info == NULL )
+	{
+		return false;
+	}
+
+	Gdiplus::GetImageEncoders( num, size, codec_info );
+
+	bool found = false;
+	for ( UINT i = 0; i < num; ++i )
+	{
+		if ( wcscmp( codec_info[ i ].MimeType, mime_type ) == 0 )
+		{
+			*clsid = codec_info[ i ].Clsid;
+			found = true;
+			break;
+		}
+	}
+
+	free( codec_info );
+
+	return found;
+}
+
+// Builds a bottom-up 32-bit device-independent bitmap from a bitmap handle.
+// The returned handle must be freed with GlobalFree, or given to the clipboard.
+static HGLOBAL CreateDibFromHBITMAP( HBITMAP hbm )
+{
+	BITMAP bm = { 0 };
+	if ( GetObjectW( hbm, sizeof( BITMAP ), &bm ) == 0 || bm.bmWidth <= 0 || bm.bmHeight <= 0 )
+	{
+		return NULL;
+	}
+
+	int line_size = bm.bmWidth * 4;
+
+	BITMAPINFOHEADER bih = { 0 };
+	bih.biSize = sizeof( BITMAPINFOHEADER );
+	bih.biWidth = bm.bmWidth;
+	bih.biHeight = bm.bmHeight;
+	bih.biPlanes = 1;
+	bih.biBitCount = 32;
+	bih.biCompression = BI_RGB;
+	bih.biSizeImage = line_size * bm.bmHeight;
+
+	HGLOBAL hdib = GlobalAlloc( GMEM_MOVEABLE, sizeof( BITMAPINFOHEADER ) + ( SIZE_T )line_size * bm.bmHeight );
+	if ( hdib == NULL )
+	{
+		return NULL;
+	}
+
+	char *dib = ( char * )GlobalLock( hdib );
+	if ( dib == NULL )
+	{
+		GlobalFree( hdib );
+		return NULL;
+	}
+
+	memcpy( dib, &bih, sizeof( BITMAPINFOHEADER ) );
+
+	HDC hDC = GetDC( NULL );
+	GetDIBits( hDC, hbm, 0, bm.bmHeight, dib + sizeof( BITMAPINFOHEADER ), ( BITMAPINFO * )&bih, DIB_RGB_COLORS );
+	ReleaseDC( NULL, hDC );
+
+	GlobalUnlock( hdib );
+
+	return hdib;
+}
+
+// Encodes an image as PNG into global memory, for the registered "PNG" clipboard format.
+// The returned handle must be freed with GlobalFree, or given to the clipboard.
+static HGLOBAL CreatePngFromImage( Gdiplus::Image *image )
+{
+	CLSID clsid;
+	if ( !GetEncoderClsid( L"image/png", &clsid ) )
+	{
+		return NULL;
+	}
+
+	IStream *is = NULL;
+	if ( CreateStreamOnHGlobal( NULL, FALSE, &is ) != S_OK )
+	{
+		return NULL;
+	}
+
+	if ( image->Save( is, &clsid, NULL ) != Gdiplus::Ok )
+	{
+		is->Release();
+		return NULL;
+	}
+
+	HGLOBAL hpng = NULL;
+
+	STATSTG stat = { 0 };
+	if ( SUCCEEDED( is->Stat( &stat, STATFLAG_NONAME ) ) && stat.cbSize.QuadPart != 0 )
+	{
+		HGLOBAL hstream = NULL;
+		if ( SUCCEEDED( GetHGlobalFromStream( is, &hstream ) ) && hstream != NULL )
+		{
+			SIZE_T size = ( SIZE_T )stat.cbSize.QuadPart;
+
+			hpng = GlobalAlloc( GMEM_MOVEABLE, size );
+			if ( hpng != NULL )
+			{
+				void *source = GlobalLock( hstream );
+				void *destination = GlobalLock( hpng );
+				if ( source != NULL && destination != NULL )
+				{
+					memcpy( destination, source, size );
+				}
+				else
+				{
+					GlobalFree( hpng );
+					hpng = NULL;
+				}
+
+				if ( destination != NULL ) { GlobalUnlock( hpng ); }
+				if ( source != NULL ) { GlobalUnlock( hstream ); }
+			}
+		}
+	}
+
+	is->Release();
+
+	return hpng;
+}
+
+// Copies the selected item's image to the clipboard as a bitmap and as PNG.
+void CopyImageToClipboard()
+{
+	FILE_INFO *fi = GetFocusedFileInfo();
+	if ( fi == NULL )
+	{
+		return;
+	}
+
+	Gdiplus::Image *image = CreateImageFromItem( fi );
+	if ( image == NULL )
+	{
+		return;
+	}
+
+	// Render the image into a bitmap. The bitmap clipboard formats have no alpha channel,
+	// so any transparency is blended onto white.
+	HBITMAP hbm = NULL;
+	Gdiplus::Bitmap *bitmap = new Gdiplus::Bitmap( ( INT )image->GetWidth(), ( INT )image->GetHeight(), PixelFormat32bppRGB );
+	if ( bitmap->GetLastStatus() == Gdiplus::Ok )
+	{
+		Gdiplus::Graphics graphics( bitmap );
+		graphics.Clear( Gdiplus::Color( 255, 255, 255 ) );
+		graphics.DrawImage( image, 0, 0, ( INT )image->GetWidth(), ( INT )image->GetHeight() );
+		bitmap->GetHBITMAP( Gdiplus::Color( 255, 255, 255 ), &hbm );
+	}
+	delete bitmap;
+
+	HGLOBAL hdib = ( hbm != NULL ? CreateDibFromHBITMAP( hbm ) : NULL );
+	HGLOBAL hpng = CreatePngFromImage( image );
+
+	delete image;
+
+	if ( hdib == NULL && hpng == NULL )
+	{
+		if ( hbm != NULL ) { DeleteObject( hbm ); }
+		return;
+	}
+
+	if ( OpenClipboard( g_hWnd_main ) == FALSE )
+	{
+		if ( hbm != NULL ) { DeleteObject( hbm ); }
+		if ( hdib != NULL ) { GlobalFree( hdib ); }
+		if ( hpng != NULL ) { GlobalFree( hpng ); }
+		return;
+	}
+
+	EmptyClipboard();
+
+	UINT png_format = RegisterClipboardFormatA( "PNG" );
+
+	// SetClipboardData takes ownership of the handles it accepts, so we clear them when it succeeds.
+	bool in_clipboard = false;
+
+	if ( hdib != NULL && SetClipboardData( CF_DIB, hdib ) != NULL ) { hdib = NULL; in_clipboard = true; }
+	if ( hpng != NULL && SetClipboardData( png_format, hpng ) != NULL ) { hpng = NULL; in_clipboard = true; }
+	if ( hbm != NULL && SetClipboardData( CF_BITMAP, hbm ) != NULL ) { hbm = NULL; in_clipboard = true; }
+
+	CloseClipboard();
+
+	if ( hdib != NULL ) { GlobalFree( hdib ); }
+	if ( hpng != NULL ) { GlobalFree( hpng ); }
+	if ( hbm != NULL ) { DeleteObject( hbm ); }
+
+	if ( !in_clipboard )
+	{
+		MessageBoxA( g_hWnd_main, "The image could not be copied to the clipboard.", PROGRAM_CAPTION_A, MB_APPLMODAL | MB_ICONWARNING );
+	}
+}
+
+// Saves the selected item's image to a file that the user chooses.
+void ExportSelectedImage()
+{
+	FILE_INFO *fi = GetFocusedFileInfo();
+	if ( fi == NULL || fi->size == 0 )
+	{
+		return;
+	}
+
+	wchar_t file_path[ MAX_PATH ] = { 0 };
+
+	// Suggest the entry's own filename, without its image extension. The default extension will be added back.
+	if ( fi->filename != NULL )
+	{
+		wchar_t *filename = GetFilenameFromPath( fi->filename, ( unsigned long )wcslen( fi->filename ) );
+		if ( filename != NULL )
+		{
+			wcsncpy_s( file_path, MAX_PATH, filename, MAX_PATH - 1 );
+
+			wchar_t *ext = GetExtensionFromFilename( file_path, ( unsigned long )wcslen( file_path ) );
+			if ( ext > file_path && *ext == L'.' &&
+				 ( _wcsicmp( ext, L".bmp" ) == 0 || _wcsicmp( ext, L".jpg" ) == 0 || _wcsicmp( ext, L".jpeg" ) == 0 || _wcsicmp( ext, L".png" ) == 0 ) )
+			{
+				*ext = 0;
+			}
+		}
+	}
+
+	OPENFILENAME ofn = { 0 };
+	ofn.lStructSize = sizeof( OPENFILENAME );
+	ofn.hwndOwner = g_hWnd_main;
+	ofn.lpstrFilter = L"PNG Image (*.png)\0*.png\0JPEG Image (*.jpg;*.jpeg)\0*.jpg;*.jpeg\0Bitmap Image (*.bmp)\0*.bmp\0\0";
+	ofn.lpstrTitle = L"Export image";
+	ofn.lpstrFile = file_path;
+	ofn.nMaxFile = MAX_PATH;
+	ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
+
+	if ( fi->flag & FIF_TYPE_JPG )
+	{
+		ofn.nFilterIndex = 2;
+		ofn.lpstrDefExt = L"jpg";
+	}
+	else if ( fi->flag & FIF_TYPE_BMP )
+	{
+		ofn.nFilterIndex = 3;
+		ofn.lpstrDefExt = L"bmp";
+	}
+	else
+	{
+		ofn.nFilterIndex = 1;
+		ofn.lpstrDefExt = L"png";
+	}
+
+	if ( GetSaveFileName( &ofn ) == FALSE )
+	{
+		return;
+	}
+
+	// Use the extension in the chosen path if there is one, otherwise the extension of the chosen file type.
+	wchar_t *ext = GetExtensionFromFilename( file_path, ( unsigned long )wcslen( file_path ) );
+	if ( ext == NULL || *ext != L'.' )
+	{
+		ext = ( wchar_t * )( ( ofn.nFilterIndex == 2 ) ? L".jpg" : ( ( ofn.nFilterIndex == 3 ) ? L".bmp" : L".png" ) );
+	}
+
+	bool saved = false;
+
+	// If the chosen type is the item's stored type, write the original image data without re-encoding it.
+	if ( ( ( fi->flag & FIF_TYPE_BMP ) && _wcsicmp( ext, L".bmp" ) == 0 ) ||
+		 ( ( fi->flag & FIF_TYPE_JPG ) && ( _wcsicmp( ext, L".jpg" ) == 0 || _wcsicmp( ext, L".jpeg" ) == 0 ) ) ||
+		 ( ( fi->flag & FIF_TYPE_PNG ) && _wcsicmp( ext, L".png" ) == 0 ) )
+	{
+		DWORD size = 0;
+		char *data = ReadItemImageData( fi, &size );
+		if ( data != NULL && size != 0 )
+		{
+			HANDLE hFile = CreateFile( file_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+			if ( hFile != INVALID_HANDLE_VALUE )
+			{
+				DWORD written = 0;
+				WriteFile( hFile, data, size, &written, NULL );
+				CloseHandle( hFile );
+
+				saved = ( written == size );
+			}
+		}
+
+		free( data );
+	}
+
+	// Otherwise, decode the image and save it with the encoder that matches the chosen extension.
+	if ( !saved )
+	{
+		Gdiplus::Image *image = CreateImageFromItem( fi );
+		if ( image != NULL )
+		{
+			const wchar_t *mime_type = L"image/png";
+			if ( _wcsicmp( ext, L".jpg" ) == 0 || _wcsicmp( ext, L".jpeg" ) == 0 )
+			{
+				mime_type = L"image/jpeg";
+			}
+			else if ( _wcsicmp( ext, L".bmp" ) == 0 )
+			{
+				mime_type = L"image/bmp";
+			}
+
+			CLSID clsid;
+			if ( GetEncoderClsid( mime_type, &clsid ) )
+			{
+				saved = ( image->Save( file_path, &clsid, NULL ) == Gdiplus::Ok );
+			}
+
+			delete image;
+		}
+	}
+
+	if ( !saved )
+	{
+		MessageBoxA( g_hWnd_main, "The image could not be exported.", PROGRAM_CAPTION_A, MB_APPLMODAL | MB_ICONWARNING );
+	}
+}
+
 BOOL CALLBACK EnumChildProc( HWND hWnd, LPARAM lParam )
 {
 	HFONT hFont = ( HFONT )lParam;

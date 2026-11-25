@@ -59,6 +59,12 @@ bool skip_main = false;				// Prevents the main window from moving the image win
 
 bool first_show = false;			// Show the image window for the first time.
 
+HWND g_hWnd_splitter = NULL;		// Handle to the splitter between the list and the preview pane.
+
+int preview_width = 0;			// Width of the preview pane in the main window's client area.
+
+bool splitter_dragging = false;	// Toggled while the splitter is being dragged.
+
 RECT last_dim = { 0 };				// Keeps track of the image window's dimension before it gets minimized.
 
 HCURSOR wait_cursor = NULL;			// Temporary cursor while processing entries.
@@ -188,6 +194,152 @@ int CALLBACK CompareFunc( LPARAM lParam1, LPARAM lParam2, LPARAM lParamSort )
 	}	
 }
 
+// Positions the list, the splitter, and the preview pane inside the main window's client area.
+// The preview pane only ever changes width; its height always follows the window.
+static void LayoutChildWindows( HWND hWnd )
+{
+	RECT rc;
+	GetClientRect( hWnd, &rc );
+
+	// Nothing to lay out yet: the main window is created with a zero-sized client area.
+	if ( rc.right <= 0 || rc.bottom <= 0 )
+	{
+		return;
+	}
+
+	int splitter_width = _SCALE_( SPLITTER_WIDTH, dpi_main );
+	int min_list_width = _SCALE_( 120, dpi_main );
+	int min_preview_width = _SCALE_( 100, dpi_main );
+
+	// Give the preview most of the window the first time we lay it out.
+	if ( preview_width == 0 )
+	{
+		preview_width = ( rc.right * 6 ) / 10;
+	}
+
+	int max_preview_width = rc.right - min_list_width - splitter_width;
+	if ( max_preview_width < min_preview_width )
+	{
+		max_preview_width = min_preview_width;
+	}
+
+	if ( preview_width > max_preview_width )
+	{
+		preview_width = max_preview_width;
+	}
+	else if ( preview_width < min_preview_width )
+	{
+		preview_width = min_preview_width;
+	}
+
+	int list_width = rc.right - preview_width - splitter_width;
+	if ( list_width < 0 )
+	{
+		list_width = 0;
+	}
+
+	HDWP hdwp = BeginDeferWindowPos( 3 );
+	if ( hdwp != NULL )
+	{
+		if ( g_hWnd_list != NULL )
+		{
+			hdwp = DeferWindowPos( hdwp, g_hWnd_list, HWND_TOP, 0, 0, list_width, rc.bottom, SWP_NOACTIVATE );
+		}
+		if ( g_hWnd_splitter != NULL )
+		{
+			hdwp = DeferWindowPos( hdwp, g_hWnd_splitter, HWND_TOP, list_width, 0, splitter_width, rc.bottom, SWP_NOACTIVATE );
+		}
+		if ( g_hWnd_image != NULL )
+		{
+			hdwp = DeferWindowPos( hdwp, g_hWnd_image, HWND_TOP, list_width + splitter_width, 0, preview_width, rc.bottom, SWP_NOACTIVATE );
+		}
+		EndDeferWindowPos( hdwp );
+	}
+
+	// The image is positioned relative to the client area, so redraw it after a resize.
+	if ( g_hWnd_image != NULL )
+	{
+		InvalidateRect( g_hWnd_image, NULL, TRUE );
+	}
+}
+
+// The splitter between the list and the preview pane. Dragging it changes only the preview's width.
+LRESULT CALLBACK SplitterWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam )
+{
+	switch ( msg )
+	{
+		case WM_LBUTTONDOWN:
+		{
+			SetCapture( hWnd );
+			splitter_dragging = true;
+			return 0;
+		}
+		break;
+
+		case WM_MOUSEMOVE:
+		{
+			if ( splitter_dragging )
+			{
+				POINT p;
+				p.x = ( short )LOWORD( lParam );
+				p.y = ( short )HIWORD( lParam );
+				ClientToScreen( hWnd, &p );
+				ScreenToClient( g_hWnd_main, &p );
+
+				RECT rc;
+				GetClientRect( g_hWnd_main, &rc );
+
+				// The preview pane's width is the distance from the cursor to the right edge of the client area.
+				int new_preview_width = rc.right - p.x;
+				int splitter_width = _SCALE_( SPLITTER_WIDTH, dpi_main );
+				int min_preview_width = _SCALE_( 100, dpi_main );
+				int min_list_width = _SCALE_( 120, dpi_main );
+				int max_preview_width = rc.right - min_list_width - splitter_width;
+
+				if ( max_preview_width < min_preview_width )
+				{
+					max_preview_width = min_preview_width;
+				}
+
+				if ( new_preview_width < min_preview_width )
+				{
+					new_preview_width = min_preview_width;
+				}
+				else if ( new_preview_width > max_preview_width )
+				{
+					new_preview_width = max_preview_width;
+				}
+
+				preview_width = new_preview_width;
+
+				LayoutChildWindows( g_hWnd_main );
+			}
+			return 0;
+		}
+		break;
+
+		case WM_LBUTTONUP:
+		{
+			if ( splitter_dragging )
+			{
+				splitter_dragging = false;
+				ReleaseCapture();
+			}
+			return 0;
+		}
+		break;
+
+		case WM_CAPTURECHANGED:
+		{
+			splitter_dragging = false;
+			return 0;
+		}
+		break;
+	}
+
+	return DefWindowProc( hWnd, msg, wParam, lParam );
+}
+
 LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam )
 {
 	switch ( msg )
@@ -205,6 +357,9 @@ LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam 
 			// Create our listview window.
 			g_hWnd_list = CreateWindow( WC_LISTVIEW, NULL, LVS_REPORT | LVS_EDITLABELS | LVS_OWNERDRAWFIXED | WS_CHILDWINDOW | WS_VISIBLE, 0, 0, _SCALE_( MIN_WIDTH, dpi_main ), _SCALE_( MIN_HEIGHT, dpi_main ), hWnd, NULL, NULL, NULL );
 			SendMessage( g_hWnd_list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES );
+
+			// Create the splitter that separates the list from the preview pane. Dragging it resizes the preview.
+			g_hWnd_splitter = CreateWindow( L"splitter", NULL, WS_CHILDWINDOW | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0, 0, 0, hWnd, NULL, NULL, NULL );
 
 			// Make pretty font.
 			SendMessage( g_hWnd_list, WM_SETFONT, ( WPARAM )hFont_main, 0 );
@@ -304,7 +459,6 @@ LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam 
 		case WM_MOVING:
 		{
 			POINT cur_pos;
-			RECT wa;
 			RECT *rc = ( RECT * )lParam;
 
 			GetCursorPos( &cur_pos );
@@ -335,71 +489,6 @@ LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam 
 				OffsetRect( rc, 0, mi.rcWork.bottom - rc->bottom + g_border_width );
 			}
 
-			// Allow our main window to attach to the image window.
-			GetWindowRect( g_hWnd_image, &wa );
-			if ( !is_attached && IsWindowVisible( g_hWnd_image ) == TRUE )
-			{
-				if ( is_close( rc->right - g_border_width, wa.left + g_border_width ) )			// Attach to left side of image window.
-				{
-					// Allow it to snap only to the dimensions of the image window.
-					if ( ( rc->bottom > wa.top ) && ( rc->top < wa.bottom ) )
-					{
-						OffsetRect( rc, wa.left - rc->right + ( g_border_width * 2 ), 0 );
-						is_attached = true;
-					}
-				}
-				else if ( is_close( wa.right - g_border_width, rc->left + g_border_width ) )	// Attach to right side of image window.
-				{
-					// Allow it to snap only to the dimensions of the image window.
-					if ( ( rc->bottom > wa.top ) && ( rc->top < wa.bottom ) )
-					{
-						OffsetRect( rc, wa.right - rc->left - ( g_border_width * 2 ), 0 );
-						is_attached = true;
-					}
-				}
-
-				if ( is_close( rc->bottom - g_border_width, wa.top ) )			// Attach to top of image window.
-				{
-					// Allow it to snap only to the dimensions of the image window.
-					if ( ( rc->left < wa.right ) && ( rc->right > wa.left ) )
-					{
-						OffsetRect( rc, 0, wa.top - rc->bottom + g_border_width );
-						is_attached = true;
-					}
-				}
-				else if ( is_close( wa.bottom - g_border_width, rc->top ) )		// Attach to bottom of image window.
-				{
-					// Allow it to snap only to the dimensions of the image window.
-					if ( ( rc->left < wa.right ) && ( rc->right > wa.left ) )
-					{
-						OffsetRect( rc, 0, wa.bottom - rc->top - g_border_width );
-						is_attached = true;
-					}
-				}
-			}
-
-			// See if our image window is visible
-			if ( IsWindowVisible( g_hWnd_image ) == TRUE )
-			{
-				// If it's attached, then move it in proportion to our main window.
-				if ( is_attached )
-				{
-					// If our main window attached itself to the image window, then we'll skip moving the image window.
-					if ( skip_main )
-					{
-						// Moves the image window with the main window.
-						MoveWindow( g_hWnd_image, wa.left + ( rc->left - last_pos.left ), wa.top + ( rc->top - last_pos.top ), wa.right - wa.left, wa.bottom - wa.top, FALSE );
-					}
-					else
-					{
-						// This causes the image window to snap to the main window. Kinda like a magnet. This is how they work by the way.
-						MoveWindow( hWnd, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top, FALSE );
-					}
-					
-					skip_main = true;
-				}
-			}
-
 			// Save our last position.
 			last_pos.bottom = rc->bottom;
 			last_pos.left = rc->left;
@@ -426,17 +515,8 @@ LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam 
 
 		case WM_SIZE:
 		{
-			// If our window changes size, assume we aren't attached anymore.
-			is_attached = false;
-			skip_main = false;
-
-			RECT rc;
-			GetClientRect( hWnd, &rc );
-
-			// Allow our listview to resize in proportion to the main window.
-			HDWP hdwp = BeginDeferWindowPos( 1 );
-			DeferWindowPos( hdwp, g_hWnd_list, HWND_TOP, 0, 0, rc.right, rc.bottom, 0 );
-			EndDeferWindowPos( hdwp );
+			// Position the list, the splitter, and the preview pane.
+			LayoutChildWindows( hWnd );
 
 			return 0;
 		}
@@ -678,13 +758,22 @@ LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam 
 					}
 					break;
 
+					case MENU_SETTINGS:
+					{
+						ShowSettingsDialog( hWnd );
+					}
+					break;
+
 					case MENU_REMOVE_SEL:
 					{
-						// Hide the image window since the selected item will be deleted.
-						if ( IsWindowVisible( g_hWnd_image ) == TRUE )
+						// Clear the preview pane since the selected item will be deleted.
+						if ( gdi_image != NULL )
 						{
-							ShowWindow( g_hWnd_image, SW_HIDE );
+							delete gdi_image;
+							gdi_image = NULL;
 						}
+
+						InvalidateRect( g_hWnd_image, NULL, TRUE );
 
 						is_attached = false;
 						skip_main = false;
@@ -696,6 +785,18 @@ LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam 
 					case MENU_COPY_SEL:
 					{
 						CloseHandle( ( HANDLE )_beginthreadex( NULL, 0, &copy_items, ( void * )0, 0, NULL ) );
+					}
+					break;
+
+					case MENU_COPY_IMAGE:
+					{
+						CopyImageToClipboard();
+					}
+					break;
+
+					case MENU_EXPORT_IMAGE:
+					{
+						ExportSelectedImage();
 					}
 					break;
 
@@ -974,10 +1075,25 @@ LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam 
 
 				case NM_RCLICK:
 				{
+					NMITEMACTIVATE *nmitem = ( NMITEMACTIVATE * )lParam;
+
+					// Make sure the item that was right clicked is the one our menu commands act on.
+					if ( nmitem->iItem != -1 )
+					{
+						LVITEM lvi = { NULL };
+						lvi.mask = LVIF_STATE;
+						lvi.state = LVIS_SELECTED | LVIS_FOCUSED;
+						lvi.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+						SendMessage( g_hWnd_list, LVM_SETITEMSTATE, nmitem->iItem, ( LPARAM )&lvi );
+					}
+
 					// Show our edit context menu as a popup.
 					POINT p;
 					GetCursorPos( &p ) ;
-					TrackPopupMenu( g_hMenuSub_context, 0, p.x, p.y, 0, hWnd, NULL );
+
+					UpdateMenus( UM_ENABLE );
+
+					TrackPopupMenu( g_hMenuSub_context, TPM_RIGHTBUTTON, p.x, p.y, 0, hWnd, NULL );
 				}
 				break;
 
@@ -1060,24 +1176,6 @@ LRESULT CALLBACK MainWndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam 
 						is->Write( current_image, read, &written );	// Only write what we've read.
 						gdi_image = new Gdiplus::Image( is );
 						is->Release();
-
-						if ( IsWindowVisible( g_hWnd_image ) == FALSE )
-						{
-							// Move our image window next to the main window on its right side if it's the first time we're showing the image window.
-							if ( !first_show )
-							{
-								SetWindowPos( g_hWnd_image, HWND_TOPMOST, last_pos.right - ( g_border_width * 2 ), last_pos.top, _SCALE_( MIN_HEIGHT, dpi_main ), _SCALE_( MIN_HEIGHT, dpi_main ), SWP_NOACTIVATE );
-								first_show = true;
-							}
-
-							// This is done to keep both windows on top of other windows.
-							// Set the image window position on top of all windows except topmost windows, but don't set focus to it.
-							SetWindowPos( g_hWnd_image, HWND_TOP, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE );
-							// Set our main window on top of the image window.
-							SetWindowPos( hWnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE );
-							// The image window is on top of everything (except the main window), set it back to non-topmost.
-							SetWindowPos( g_hWnd_image, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW );
-						}
 
 						// Set our image window's icon to match the file extension.
 						if ( fi->flag & FIF_TYPE_BMP )
