@@ -52,6 +52,7 @@ pub const VK_NUMPAD0: u32 = 0x60;
 
 // Listview messages.
 pub const LVM_FIRST: u32 = 0x1000;
+pub const LVM_SETBKCOLOR: u32 = LVM_FIRST + 1;
 pub const LVM_GETITEMCOUNT: u32 = LVM_FIRST + 4;
 pub const LVM_DELETEITEM: u32 = LVM_FIRST + 8;
 pub const LVM_DELETEALLITEMS: u32 = LVM_FIRST + 9;
@@ -66,13 +67,33 @@ pub const LVM_GETSELECTEDCOUNT: u32 = LVM_FIRST + 50;
 pub const LVM_SETEXTENDEDLISTVIEWSTYLE: u32 = LVM_FIRST + 54;
 pub const LVM_INSERTITEMW: u32 = LVM_FIRST + 77;
 pub const LVM_INSERTCOLUMNW: u32 = LVM_FIRST + 97;
+pub const LVM_GETHEADER: u32 = LVM_FIRST + 31;
+pub const LVM_GETSUBITEMRECT: u32 = LVM_FIRST + 56;
+pub const LVIR_BOUNDS: i32 = 0;
+pub const LVM_SETTEXTCOLOR: u32 = LVM_FIRST + 36;
+pub const LVM_SETTEXTBKCOLOR: u32 = LVM_FIRST + 38;
 pub const LVM_SETITEMTEXTW: u32 = LVM_FIRST + 116;
+
+// Custom draw notifications and return values.
+pub const NM_CUSTOMDRAW: u32 = 0xFFFF_FFF4;
+pub const CDDS_PREPAINT: u32 = 0x0000_0001;
+pub const CDDS_ITEMPREPAINT: u32 = 0x0001_0001;
+pub const CDRF_DODEFAULT: isize = 0;
+pub const CDRF_NEWFONT: isize = 0x0000_0002;
+pub const CDRF_SKIPDEFAULT: isize = 0x0000_0004;
+pub const CDRF_NOTIFYITEMDRAW: isize = 0x0000_0020;
+pub const CDIS_SELECTED: u32 = 0x0000_0001;
+pub const INDEX_WNDPROC: i32 = -4;
+
+// Static control styles (SS_LEFT is zero, so it is spelled out here).
+pub const SS_TEXT_LEFT: u32 = 0x0000_0000;
 
 pub const LVN_FIRST: u32 = 0u32.wrapping_sub(100);
 pub const LVN_ITEMCHANGED: u32 = LVN_FIRST.wrapping_sub(1);
 pub const LVN_COLUMNCLICK: u32 = LVN_FIRST.wrapping_sub(8);
 pub const LVN_KEYDOWN: u32 = LVN_FIRST.wrapping_sub(55);
 
+pub const LVIF_STATE: u32 = 0x0008;
 pub const LVIF_TEXT: u32 = 0x0001;
 pub const LVIF_PARAM: u32 = 0x0004;
 pub const LVIS_FOCUSED: u32 = 0x0001;
@@ -143,6 +164,25 @@ pub struct Nmlistview {
 }
 
 #[repr(C)]
+pub struct Nmcustomdraw {
+    pub hdr: Nmhdr,
+    pub dwDrawStage: u32,
+    pub hdc: HDC,
+    pub rc: RECT,
+    pub dwItemSpec: usize,
+    pub uItemState: u32,
+    pub lItemlParam: isize,
+}
+
+#[repr(C)]
+pub struct Nmlvcustomdraw {
+    pub nmcd: Nmcustomdraw,
+    pub clrText: u32,
+    pub clrTextBk: u32,
+    pub iSubItem: i32,
+}
+
+#[repr(C)]
 pub struct Nmcolumnclick {
     pub hdr: Nmhdr,
     pub iItem: i32,
@@ -168,7 +208,13 @@ pub unsafe fn from_wide(ptr: *const u16) -> String {
     String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
 }
 
+/// Message box that follows the dark theme. Falls back to the system box only
+/// when there is no themed window yet (startup failures before the app exists).
 pub unsafe fn msgbox(owner: HWND, text: &str, flags: u32) -> i32 {
+    if crate::app::is_ready() {
+        crate::dialogs::show_message(owner, text, (flags & MB_ICONWARNING) != 0);
+        return 1;
+    }
     let t = wide(text);
     let c = wide(PROGRAM_CAPTION);
     MessageBoxW(owner, t.as_ptr(), c.as_ptr(), flags)

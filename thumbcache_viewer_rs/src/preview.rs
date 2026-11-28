@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use crate::app::{with_app, MENU_COPY_IMAGE, MENU_EXPORT_IMAGE};
+use crate::theme;
 use crate::win::*;
 use std::path::Path;
 
@@ -244,8 +245,7 @@ impl Preview {
                         SelectObject(mem, self.font as HGDIOBJ)
                     };
 
-                    let brush = GetSysColorBrush(COLOR_WINDOW_IDX);
-                    FillRect(mem, &rc, brush);
+                    theme::fill(mem, &rc, theme::CANVAS);
 
                     match &self.dib {
                         Some(dib) => self.draw_image(mem, dib, cw, ch),
@@ -308,6 +308,15 @@ impl Preview {
             SRCCOPY,
         );
 
+        // A one pixel frame makes the document read as floating on the canvas.
+        let border = RECT {
+            left: dx - 1,
+            top: dy - 1,
+            right: dx + dw + 1,
+            bottom: dy + dh + 1,
+        };
+        theme::frame(hdc, &border, theme::IMAGE_FRAME);
+
         // Zoom readout in the bottom-left corner, in the UI font.
         let label = format!("{}%", (self.scale * 100.0).round() as i32);
         let mut wtext = wide(&label);
@@ -317,9 +326,8 @@ impl Preview {
             right: cw - 12,
             bottom: ch - 8,
         };
-        SetBkMode(hdc, OPAQUE as i32);
-        SetBkColor(hdc, GetSysColor(COLOR_WINDOW_IDX));
-        SetTextColor(hdc, GetSysColor(COLOR_GRAYTEXT_IDX));
+        SetBkMode(hdc, TRANSPARENT as i32);
+        SetTextColor(hdc, theme::TEXT_DIM);
         DrawTextW(
             hdc,
             wtext.as_mut_ptr(),
@@ -331,7 +339,7 @@ impl Preview {
 
     unsafe fn draw_message(&self, hdc: HDC, cw: i32, ch: i32) {
         SetBkMode(hdc, TRANSPARENT as i32);
-        SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT_IDX));
+        SetTextColor(hdc, theme::TEXT_DIM);
 
         let mut text = wide(&self.message);
         let width = (cw - 32).max(32);
@@ -404,18 +412,21 @@ impl Preview {
         Some(out)
     }
 
-    pub unsafe fn copy_to_clipboard(&self, owner: HWND) {
+    /// Returns a message describing why nothing was copied, or None on success.
+    /// The caller shows it outside of the app borrow, so the modal dialog can
+    /// never run while the app state is locked.
+    pub unsafe fn copy_to_clipboard(&self, owner: HWND) -> Option<&'static str> {
         if !self.has_image() {
-            msgbox(owner, "There is no image to copy.", MB_OK | MB_ICONINFORMATION);
-            return;
+            return Some("There is no image to copy.");
         }
 
-        let Some(dib) = self.dib_bytes() else { return };
+        let Some(dib) = self.dib_bytes() else {
+            return Some("There is no image to copy.");
+        };
         let png = encode_png(&self.pixels, self.width, self.height);
 
         if OpenClipboard(owner) == 0 {
-            msgbox(owner, "Unable to open the clipboard.", MB_OK | MB_ICONWARNING);
-            return;
+            return Some("Unable to open the clipboard.");
         }
         EmptyClipboard();
 
@@ -454,6 +465,7 @@ impl Preview {
         }
 
         CloseClipboard();
+        None
     }
 
     pub fn export_to(&self, path: &Path) -> Option<Result<(), String>> {
@@ -521,7 +533,7 @@ pub unsafe extern "system" fn preview_proc(
                 let hdc = BeginPaint(hwnd, &mut ps);
                 let mut rc: RECT = std::mem::zeroed();
                 GetClientRect(hwnd, &mut rc);
-                FillRect(hdc, &rc, GetSysColorBrush(COLOR_WINDOW_IDX));
+                theme::fill(hdc, &rc, theme::CANVAS);
                 EndPaint(hwnd, &ps);
             }
             0
@@ -536,6 +548,7 @@ pub unsafe extern "system" fn preview_proc(
             ScreenToClient(hwnd, &mut pt);
             with_app(|app| {
                 app.preview.zoom_at(delta, (pt.x as f32, pt.y as f32));
+                app.refresh_status();
                 InvalidateRect(app.preview.hwnd, std::ptr::null(), 0);
             });
             0
@@ -577,7 +590,10 @@ pub unsafe extern "system" fn preview_proc(
             0
         }
         WM_LBUTTONDBLCLK => {
-            with_app(|app| app.preview.reset_zoom());
+            with_app(|app| {
+                app.preview.reset_zoom();
+                app.refresh_status();
+            });
             0
         }
         WM_RBUTTONUP => {
@@ -608,11 +624,14 @@ pub unsafe extern "system" fn preview_proc(
             0
         }
         WM_KEYDOWN => {
-            with_app(|app| match wparam as u32 {
-                VK_OEM_PLUS | VK_ADD => app.preview.zoom(1.0),
-                VK_OEM_MINUS | VK_SUBTRACT => app.preview.zoom(-1.0),
-                VK_0 | VK_NUMPAD0 => app.preview.reset_zoom(),
-                _ => {}
+            with_app(|app| {
+                match wparam as u32 {
+                    VK_OEM_PLUS | VK_ADD => app.preview.zoom(1.0),
+                    VK_OEM_MINUS | VK_SUBTRACT => app.preview.zoom(-1.0),
+                    VK_0 | VK_NUMPAD0 => app.preview.reset_zoom(),
+                    _ => {}
+                }
+                app.refresh_status();
             });
             0
         }

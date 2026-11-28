@@ -2,10 +2,12 @@
 
 #![allow(dead_code)]
 
+use crate::chrome;
 use crate::dialogs;
 use crate::preview::{self, Preview};
 use crate::save;
 use crate::settings::{self, Settings};
+use crate::theme;
 use crate::thumbcache::{self, Entry};
 use crate::win::*;
 use std::cell::RefCell;
@@ -64,6 +66,44 @@ pub struct App {
     pub dpi: u32,
     pub preview_width: i32,
     pub col_fmt: [u8; NUM_COLUMNS],
+    pub toolbar: HWND,
+    pub list_bar: HWND,
+    pub preview_bar: HWND,
+    pub status: HWND,
+}
+
+impl App {
+    /// Refreshes the status bar from the current selection and zoom level.
+    pub fn refresh_status(&self) {
+        if self.status.is_null() {
+            return;
+        }
+        let left = if self.preview.has_image() {
+            format!(
+                "{:.0}%     {} \u{00D7} {} px",
+                self.preview.scale * 100.0,
+                self.preview.width,
+                self.preview.height
+            )
+        } else {
+            String::from("No image")
+        };
+        let count = self.visible.len();
+        let selected = unsafe { SendMessageW(self.list, LVM_GETSELECTEDCOUNT, 0, 0) } as usize;
+        let mut right = if count == 1 {
+            String::from("1 entry")
+        } else {
+            format!("{} entries", count)
+        };
+        if selected > 0 {
+            right.push_str(&format!("     {} selected", selected));
+        }
+        let text = format!("{}\t{}", left, right);
+        let mut wtext = wide(&text);
+        unsafe {
+            SetWindowTextW(self.status, wtext.as_mut_ptr());
+        }
+    }
 }
 
 thread_local! {
@@ -150,7 +190,7 @@ pub unsafe fn create(hwnd: HWND, cmd_line: &CommandLine) {
     let hinst = GetModuleHandleW(std::ptr::null());
 
     let list = CreateWindowExW(
-        WS_EX_CLIENTEDGE,
+        0,
         wide(WC_LISTVIEWW).as_ptr(),
         wide("").as_ptr(),
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | LVS_REPORT | LVS_SHOWSELALWAYS as u32,
@@ -170,6 +210,19 @@ pub unsafe fn create(hwnd: HWND, cmd_line: &CommandLine) {
         (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as usize,
         (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as isize,
     );
+
+    // Dark list: Explorer dark theme for its scrollbars, our own colours and a
+    // custom drawn header and rows (so the system selection colour never shows).
+    SendMessageW(list, LVM_SETBKCOLOR, 0, theme::PANEL as isize);
+    SendMessageW(list, LVM_SETTEXTCOLOR, 0, theme::TEXT as isize);
+    SendMessageW(list, LVM_SETTEXTBKCOLOR, 0, theme::PANEL as isize);
+    theme::darken_control(list);
+    theme::darken_scrollbars(list);
+    let header = SendMessageW(list, LVM_GETHEADER, 0, 0) as HWND;
+    if !header.is_null() {
+        theme::untheme(header);
+    }
+    install_list_subclass(list);
 
     for (i, name) in COLUMNS.iter().enumerate() {
         let mut text = wide(name);
@@ -205,8 +258,68 @@ pub unsafe fn create(hwnd: HWND, cmd_line: &CommandLine) {
     );
 
     let preview_hwnd = CreateWindowExW(
-        WS_EX_CLIENTEDGE,
+        0,
         wide(preview::PREVIEW_CLASS).as_ptr(),
+        wide("").as_ptr(),
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        0,
+        0,
+        0,
+        0,
+        hwnd,
+        std::ptr::null_mut(),
+        hinst,
+        std::ptr::null(),
+    );
+
+    let toolbar = CreateWindowExW(
+        0,
+        wide(chrome::TOOLBAR_CLASS).as_ptr(),
+        wide("").as_ptr(),
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        0,
+        0,
+        0,
+        0,
+        hwnd,
+        std::ptr::null_mut(),
+        hinst,
+        std::ptr::null(),
+    );
+
+    let list_bar = CreateWindowExW(
+        0,
+        wide(chrome::PANELBAR_CLASS).as_ptr(),
+        wide("Cache entries").as_ptr(),
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        0,
+        0,
+        0,
+        0,
+        hwnd,
+        std::ptr::null_mut(),
+        hinst,
+        std::ptr::null(),
+    );
+
+    let preview_bar = CreateWindowExW(
+        0,
+        wide(chrome::PANELBAR_CLASS).as_ptr(),
+        wide("Preview").as_ptr(),
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        0,
+        0,
+        0,
+        0,
+        hwnd,
+        std::ptr::null_mut(),
+        hinst,
+        std::ptr::null(),
+    );
+
+    let status = CreateWindowExW(
+        0,
+        wide(chrome::STATUS_CLASS).as_ptr(),
         wide("").as_ptr(),
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
         0,
@@ -239,6 +352,10 @@ pub unsafe fn create(hwnd: HWND, cmd_line: &CommandLine) {
         dpi,
         preview_width: saved.preview_width,
         col_fmt: [0; NUM_COLUMNS],
+        toolbar,
+        list_bar,
+        preview_bar,
+        status,
     };
 
     APP.with(|cell| *cell.borrow_mut() = Some(app));
@@ -263,6 +380,7 @@ pub unsafe fn create(hwnd: HWND, cmd_line: &CommandLine) {
         },
     );
 
+    with_app(|app| app.refresh_status());
     layout(hwnd);
 }
 
@@ -288,51 +406,129 @@ pub unsafe fn layout(hwnd: HWND) {
             app.preview_width = min_preview.min(max_preview);
         }
 
-        (app.list, app.splitter, app.preview.hwnd, app.preview_width)
+        (
+            app.list,
+            app.splitter,
+            app.preview.hwnd,
+            app.preview_width,
+            app.toolbar,
+            app.list_bar,
+            app.preview_bar,
+            app.status,
+            app.dpi,
+        )
     });
 
     // The borrow is released before any window is moved: SetWindowPos sends
     // WM_SIZE synchronously and the panes handle it through with_app, which
     // cannot re-enter while the app is already borrowed.
-    let Some((list, splitter, preview_hwnd, preview_w)) = geometry else {
+    let Some((
+        list,
+        splitter,
+        preview_hwnd,
+        preview_w,
+        toolbar,
+        list_bar,
+        preview_bar,
+        status,
+        dpi,
+    )) = geometry
+    else {
         return;
     };
+
+    let tool_h = scale(chrome::TOOLBAR_HEIGHT, dpi);
+    let bar_h = scale(chrome::PANELBAR_HEIGHT, dpi);
+    let status_h = scale(chrome::STATUS_HEIGHT, dpi);
+    let content_h = (ch - tool_h - status_h).max(0);
+    let pane_h = (content_h - bar_h).max(0);
     let list_w = (cw - preview_w - SPLITTER_WIDTH).max(0);
+    let preview_x = list_w + SPLITTER_WIDTH;
+    let pane_y = tool_h + bar_h;
 
     // Move all three children in one transaction so that a resize never
     // draws a half-moved frame where the panes overlap.
     let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS;
-    let mut hdwp = BeginDeferWindowPos(3);
+    let mut hdwp = BeginDeferWindowPos(7);
     if !hdwp.is_null() {
-        hdwp = DeferWindowPos(hdwp, list, std::ptr::null_mut(), 0, 0, list_w, ch, flags);
+        hdwp = DeferWindowPos(hdwp, toolbar, std::ptr::null_mut(), 0, 0, cw, tool_h, flags);
+        hdwp = DeferWindowPos(hdwp, list_bar, std::ptr::null_mut(), 0, tool_h, list_w, bar_h, flags);
+        hdwp = DeferWindowPos(
+            hdwp,
+            list,
+            std::ptr::null_mut(),
+            0,
+            pane_y,
+            list_w,
+            pane_h,
+            flags,
+        );
         hdwp = DeferWindowPos(
             hdwp,
             splitter,
             std::ptr::null_mut(),
             list_w,
-            0,
+            tool_h,
             SPLITTER_WIDTH,
-            ch,
+            content_h,
+            flags,
+        );
+        hdwp = DeferWindowPos(
+            hdwp,
+            preview_bar,
+            std::ptr::null_mut(),
+            preview_x,
+            tool_h,
+            preview_w,
+            bar_h,
             flags,
         );
         hdwp = DeferWindowPos(
             hdwp,
             preview_hwnd,
             std::ptr::null_mut(),
-            list_w + SPLITTER_WIDTH,
-            0,
+            preview_x,
+            pane_y,
             preview_w,
-            ch,
+            pane_h,
+            flags,
+        );
+        hdwp = DeferWindowPos(
+            hdwp,
+            status,
+            std::ptr::null_mut(),
+            0,
+            ch - status_h,
+            cw,
+            status_h,
             flags,
         );
         EndDeferWindowPos(hdwp);
     } else {
-        MoveWindow(list, 0, 0, list_w, ch, 0);
-        MoveWindow(splitter, list_w, 0, SPLITTER_WIDTH, ch, 0);
-        MoveWindow(preview_hwnd, list_w + SPLITTER_WIDTH, 0, preview_w, ch, 0);
+        MoveWindow(toolbar, 0, 0, cw, tool_h, 0);
+        MoveWindow(list_bar, 0, tool_h, list_w, bar_h, 0);
+        MoveWindow(list, 0, pane_y, list_w, pane_h, 0);
+        MoveWindow(splitter, list_w, tool_h, SPLITTER_WIDTH, content_h, 0);
+        MoveWindow(preview_bar, preview_x, tool_h, preview_w, bar_h, 0);
+        MoveWindow(preview_hwnd, preview_x, pane_y, preview_w, pane_h, 0);
+        MoveWindow(status, 0, ch - status_h, cw, status_h, 0);
     }
 
-    repaint_frame(hwnd, list, splitter, preview_hwnd);
+    repaint_frame(
+        hwnd,
+        &[
+            toolbar,
+            list_bar,
+            list,
+            splitter,
+            preview_bar,
+            preview_hwnd,
+            status,
+        ],
+    );
+
+    // Scrollbars are created on demand, so re-theme them after each layout.
+    theme::darken_scrollbars(list);
 }
 
 /// Repaints the frame and every pane synchronously, bottom of the z-order first.
@@ -343,18 +539,17 @@ pub unsafe fn layout(hwnd: HWND) {
 /// background first: every pane paints its own background in one go (the list
 /// is double-buffered, the preview blits a full back buffer), which keeps this
 /// flicker free while still covering every pixel.
-pub unsafe fn repaint_frame(hwnd: HWND, list: HWND, splitter: HWND, preview: HWND) {
+pub unsafe fn repaint_frame(hwnd: HWND, children: &[HWND]) {
     InvalidateRect(hwnd, std::ptr::null(), 0);
     UpdateWindow(hwnd);
 
-    InvalidateRect(list, std::ptr::null(), 0);
-    UpdateWindow(list);
-
-    InvalidateRect(splitter, std::ptr::null(), 0);
-    UpdateWindow(splitter);
-
-    InvalidateRect(preview, std::ptr::null(), 0);
-    UpdateWindow(preview);
+    for child in children {
+        if child.is_null() {
+            continue;
+        }
+        InvalidateRect(*child, std::ptr::null(), 0);
+        UpdateWindow(*child);
+    }
 }
 
 pub unsafe extern "system" fn splitter_proc(
@@ -371,18 +566,9 @@ pub unsafe extern "system" fn splitter_proc(
 
             let mut rc: RECT = std::mem::zeroed();
             GetClientRect(hwnd, &mut rc);
-            FillRect(hdc, &rc, GetSysColorBrush(COLOR_3DFACE_IDX));
-
-            let mut groove = RECT {
-                left: 1,
-                top: 0,
-                right: 2,
-                bottom: rc.bottom,
-            };
-            FillRect(hdc, &groove, GetSysColorBrush(COLOR_3DHIGHLIGHT_IDX));
-            groove.left = (rc.right - 2).max(1);
-            groove.right = (rc.right - 1).max(2);
-            FillRect(hdc, &groove, GetSysColorBrush(COLOR_3DSHADOW_IDX));
+            theme::fill(hdc, &rc, theme::BG);
+            theme::vline(hdc, 0, 0, rc.bottom, theme::BORDER);
+            theme::vline(hdc, rc.right - 1, 0, rc.bottom, theme::BORDER);
 
             EndPaint(hwnd, &ps);
             0
@@ -541,7 +727,35 @@ pub unsafe fn populate(hwnd: HWND) {
             }
         }
 
+        // Nothing may start out tinted: clear every selected and focused flag
+        // before the caller picks the row it actually wants.
+        let mut clear = LvItem {
+            mask: LVIF_STATE,
+            iItem: -1,
+            iSubItem: 0,
+            state: 0,
+            stateMask: LVIS_SELECTED | LVIS_FOCUSED,
+            pszText: std::ptr::null_mut(),
+            cchTextMax: 0,
+            iImage: 0,
+            lParam: 0,
+            iIndent: 0,
+            iGroupId: 0,
+            cColumns: 0,
+            puColumns: std::ptr::null_mut(),
+            piColFmt: std::ptr::null_mut(),
+            iGroup: -1,
+        };
+        SendMessageW(
+            list,
+            LVM_SETITEMSTATE,
+            usize::MAX,
+            &mut clear as *mut LvItem as isize,
+        );
+
         app.populating = false;
+        app.refresh_status();
+        theme::darken_scrollbars(list);
     });
 }
 
@@ -600,14 +814,20 @@ unsafe fn show_row(row: i32) {
     };
 
     if entry.data_size == 0 {
-        with_app(|app| app.preview.set_message("This cache entry has no image data."));
+        with_app(|app| {
+            app.preview.set_message("This cache entry has no image data.");
+            app.refresh_status();
+        });
         return;
     }
 
     let bytes = match entry.data() {
         Ok(b) => b,
         Err(e) => {
-            with_app(|app| app.preview.set_message(&format!("Unable to read data: {}", e)));
+            with_app(|app| {
+                app.preview.set_message(&format!("Unable to read data: {}", e));
+                app.refresh_status();
+            });
             return;
         }
     };
@@ -617,12 +837,16 @@ unsafe fn show_row(row: i32) {
             let rgba = img.to_rgba8();
             let (w, h) = rgba.dimensions();
             let pixels = rgba.into_raw();
-            with_app(|app| app.preview.set_image(w, h, pixels));
+            with_app(|app| {
+                app.preview.set_image(w, h, pixels);
+                app.refresh_status();
+            });
         }
         Err(e) => {
             with_app(|app| {
                 app.preview
-                    .set_message(&format!("Unable to decode image: {}", e))
+                    .set_message(&format!("Unable to decode image: {}", e));
+                app.refresh_status();
             });
         }
     }
@@ -640,6 +864,9 @@ pub unsafe fn on_notify(lp: LPARAM) -> LRESULT {
             {
                 show_row(nm.iItem);
             }
+            if !populating && (nm.uChanged & LVIF_STATE) != 0 {
+                with_app(|app| app.refresh_status());
+            }
             0
         }
         LVN_COLUMNCLICK => {
@@ -653,8 +880,192 @@ pub unsafe fn on_notify(lp: LPARAM) -> LRESULT {
             refresh_rows();
             0
         }
+        NM_CUSTOMDRAW => {
+            let draw = &mut *(lp as *mut Nmlvcustomdraw);
+            list_custom_draw(draw)
+        }
         _ => 0,
     }
+}
+
+/// Custom draws the dark list rows: dark background, light text and an accent
+/// coloured selection instead of the system highlight.
+fn list_custom_draw(draw: &mut Nmlvcustomdraw) -> LRESULT {
+    match draw.nmcd.dwDrawStage {
+        CDDS_PREPAINT => {
+            draw.clrText = theme::TEXT;
+            draw.clrTextBk = theme::PANEL;
+            CDRF_NOTIFYITEMDRAW
+        }
+        CDDS_ITEMPREPAINT => unsafe { draw_list_row(draw) },
+        _ => CDRF_DODEFAULT,
+    }
+}
+
+/// Paints a whole list row by hand: background, every cell's text and the
+/// selection colour. The control's own item painting is skipped, which is what
+/// keeps the blue system highlight from appearing on rows nobody selected.
+unsafe fn draw_list_row(draw: &mut Nmlvcustomdraw) -> LRESULT {
+    let list = draw.nmcd.hdr.hwndFrom;
+    let hdc = draw.nmcd.hdc;
+    let row = draw.nmcd.dwItemSpec as i32;
+    let selected = (draw.nmcd.uItemState & CDIS_SELECTED) != 0;
+    let dpi = GetDpiForWindow(list);
+
+    let mut client: RECT = std::mem::zeroed();
+    GetClientRect(list, &mut client);
+
+    let mut bounds = RECT {
+        left: LVIR_BOUNDS,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if SendMessageW(
+        list,
+        LVM_GETITEMRECT,
+        row as usize,
+        &mut bounds as *mut RECT as isize,
+    ) == 0
+    {
+        return CDRF_SKIPDEFAULT;
+    }
+    bounds.left = 0;
+    bounds.right = client.right;
+    theme::fill(
+        hdc,
+        &bounds,
+        if selected {
+            theme::SELECT
+        } else {
+            theme::PANEL
+        },
+    );
+
+    let cells: Vec<String> = with_app(|app| {
+        if row < 0 || row as usize >= app.visible.len() {
+            return Vec::new();
+        }
+        let index = app.visible[row as usize];
+        (0..NUM_COLUMNS)
+            .map(|col| text_for(app, col, row as usize, &app.entries[index]))
+            .collect()
+    })
+    .unwrap_or_default();
+
+    let color = if selected {
+        theme::TEXT_BRIGHT
+    } else {
+        theme::TEXT
+    };
+
+    for col in 0..NUM_COLUMNS {
+        let Some(text) = cells.get(col) else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        let mut cell = RECT {
+            left: LVIR_BOUNDS,
+            top: col as i32,
+            right: 0,
+            bottom: 0,
+        };
+        if SendMessageW(
+            list,
+            LVM_GETSUBITEMRECT,
+            row as usize,
+            &mut cell as *mut RECT as isize,
+        ) == 0
+        {
+            continue;
+        }
+        cell.left += scale(6, dpi);
+        cell.right -= scale(4, dpi);
+        theme::text_with_font(
+            hdc,
+            text,
+            cell,
+            color,
+            dpi,
+            9,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+        );
+    }
+
+    CDRF_SKIPDEFAULT
+}
+
+// ------------------------------------------------------------- list subclass
+
+static mut OLD_LIST_PROC: WNDPROC = None;
+
+/// The column header sends its custom draw notification to the listview, which
+/// does not forward it, so the listview is subclassed to paint the header dark.
+unsafe extern "system" fn list_subclass(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_NOTIFY {
+        let hdr = &*(lparam as *const Nmhdr);
+        if hdr.code == NM_CUSTOMDRAW {
+            let draw = &mut *(lparam as *mut Nmcustomdraw);
+            match draw.dwDrawStage {
+                CDDS_PREPAINT => {
+                    theme::fill(draw.hdc, &draw.rc, theme::HEADER);
+                    return CDRF_NOTIFYITEMDRAW;
+                }
+                CDDS_ITEMPREPAINT => {
+                    header_item(draw);
+                    return CDRF_SKIPDEFAULT;
+                }
+                _ => {}
+            }
+        }
+    }
+    CallWindowProcW(OLD_LIST_PROC, hwnd, msg, wparam, lparam)
+}
+
+/// The header has no coloured-text custom draw fields, so each column title is
+/// painted here instead: dark cell, light label and a hairline separator.
+unsafe fn header_item(draw: &Nmcustomdraw) {
+    theme::fill(draw.hdc, &draw.rc, theme::HEADER);
+
+    let dpi = GetDpiForWindow(draw.hdr.hwndFrom);
+    if let Some(title) = COLUMNS.get(draw.dwItemSpec) {
+        let mut rc = draw.rc;
+        rc.left += scale(8, dpi);
+        rc.right -= scale(6, dpi);
+        theme::text_with_font(
+            draw.hdc,
+            title,
+            rc,
+            theme::TEXT,
+            dpi,
+            9,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+        );
+    }
+    theme::vline(
+        draw.hdc,
+        draw.rc.right - 1,
+        draw.rc.top,
+        draw.rc.bottom,
+        theme::BORDER,
+    );
+}
+
+unsafe fn install_list_subclass(list: HWND) {
+    let previous = GetWindowLongPtrW(list, INDEX_WNDPROC);
+    OLD_LIST_PROC = std::mem::transmute::<isize, WNDPROC>(previous);
+    SetWindowLongPtrW(
+        list,
+        INDEX_WNDPROC,
+        list_subclass as *const () as usize as isize,
+    );
 }
 
 // ---------------------------------------------------------------- file handling
@@ -887,17 +1298,28 @@ pub unsafe fn on_command(hwnd: HWND, id: usize) {
             persist_settings();
         }
         MENU_ZOOM_IN => {
-            with_app(|app| app.preview.zoom(1.0));
-            InvalidateRect(hwnd, std::ptr::null(), 0);
+            with_app(|app| {
+                app.preview.zoom(1.0);
+                app.refresh_status();
+            });
         }
         MENU_ZOOM_OUT => {
-            with_app(|app| app.preview.zoom(-1.0));
+            with_app(|app| {
+                app.preview.zoom(-1.0);
+                app.refresh_status();
+            });
         }
         MENU_ZOOM_RESET => {
-            with_app(|app| app.preview.reset_zoom());
+            with_app(|app| {
+                app.preview.reset_zoom();
+                app.refresh_status();
+            });
         }
         MENU_COPY_IMAGE => {
-            with_app(|app| app.preview.copy_to_clipboard(app.hwnd));
+            let failure = with_app(|app| app.preview.copy_to_clipboard(app.hwnd)).flatten();
+            if let Some(message) = failure {
+                msgbox(hwnd, message, MB_OK | MB_ICONINFORMATION);
+            }
         }
         MENU_EXPORT_IMAGE => {
             let path = dialogs::save_file(

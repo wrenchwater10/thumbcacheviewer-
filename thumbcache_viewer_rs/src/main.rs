@@ -6,10 +6,12 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod chrome;
 mod dialogs;
 mod preview;
 mod save;
 mod settings;
+mod theme;
 mod thumbcache;
 mod win;
 
@@ -49,13 +51,13 @@ unsafe extern "system" fn main_proc(
             let hdc: HDC = wparam as *mut core::ffi::c_void;
             let mut rc: RECT = std::mem::zeroed();
             GetClientRect(hwnd, &mut rc);
-            FillRect(hdc, &rc, GetSysColorBrush(COLOR_WINDOW_IDX));
+            theme::fill(hdc, &rc, theme::BG);
             1
         }
         WM_PAINT => {
             let mut ps: PAINTSTRUCT = std::mem::zeroed();
             let hdc = BeginPaint(hwnd, &mut ps);
-            FillRect(hdc, &ps.rcPaint, GetSysColorBrush(COLOR_WINDOW_IDX));
+            theme::fill(hdc, &ps.rcPaint, theme::BG);
             EndPaint(hwnd, &ps);
             0
         }
@@ -96,6 +98,11 @@ unsafe extern "system" fn main_proc(
             }
             DragFinish(hdrop);
             app::open_files(hwnd, &paths);
+            0
+        }
+        WM_ACTIVATE => {
+            // Some builds drop the dark caption when activation changes.
+            theme::enable_dark_mode(hwnd);
             0
         }
         WM_CLOSE => {
@@ -139,6 +146,9 @@ unsafe fn register_class(
 
 fn main() {
     unsafe {
+        // Before any window exists, so menus and controls are created dark.
+        theme::init_dark_mode();
+
         let args: Vec<OsString> = std::env::args_os().skip(1).collect();
         let cl = app::parse_args(&args);
 
@@ -160,17 +170,19 @@ fn main() {
             icon = LoadIconW(std::ptr::null_mut(), IDI_APPLICATION);
         }
 
-        let main_brush = GetSysColorBrush(COLOR_WINDOW_IDX);
-        let face_brush = GetSysColorBrush(COLOR_3DFACE_IDX);
-        let text_brush = GetSysColorBrush(COLOR_WINDOWTEXT_IDX);
+        let bg_brush = theme::brush(theme::BG);
+        let panel_brush = theme::brush(theme::PANEL);
+        let toolbar_brush = theme::brush(theme::TOOLBAR);
+        let header_brush = theme::brush(theme::HEADER);
+        let canvas_brush = theme::brush(theme::CANVAS);
 
-        let ok = register_class(hinst, MAIN_CLASS, Some(main_proc), arrow, main_brush, icon)
+        let ok = register_class(hinst, MAIN_CLASS, Some(main_proc), arrow, bg_brush, icon)
             && register_class(
                 hinst,
                 preview::PREVIEW_CLASS,
                 Some(preview::preview_proc),
                 arrow,
-                text_brush,
+                canvas_brush,
                 icon,
             )
             && register_class(
@@ -178,7 +190,7 @@ fn main() {
                 SPLITTER_CLASS,
                 Some(app::splitter_proc),
                 LoadCursorW(std::ptr::null_mut(), IDC_SIZEWE),
-                face_brush,
+                bg_brush,
                 icon,
             )
             && register_class(
@@ -186,7 +198,31 @@ fn main() {
                 dialogs::SETTINGS_CLASS,
                 Some(dialogs::settings_proc),
                 arrow,
-                face_brush,
+                panel_brush,
+                icon,
+            )
+            && register_class(
+                hinst,
+                chrome::TOOLBAR_CLASS,
+                Some(chrome::toolbar_proc),
+                arrow,
+                toolbar_brush,
+                icon,
+            )
+            && register_class(
+                hinst,
+                chrome::PANELBAR_CLASS,
+                Some(chrome::panelbar_proc),
+                arrow,
+                header_brush,
+                icon,
+            )
+            && register_class(
+                hinst,
+                chrome::STATUS_CLASS,
+                Some(chrome::status_proc),
+                arrow,
+                toolbar_brush,
                 icon,
             );
 
@@ -227,6 +263,7 @@ fn main() {
             return;
         }
 
+        theme::enable_dark_mode(hwnd);
         app::create(hwnd, &cl);
         DragAcceptFiles(hwnd, 1);
 
@@ -235,6 +272,8 @@ fn main() {
         }
 
         ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+        // Re-apply once visible: some builds only honour the caption attribute then.
+        theme::enable_dark_mode(hwnd);
         UpdateWindow(hwnd);
 
         let accels = [
