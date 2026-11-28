@@ -522,6 +522,7 @@ struct PopupState {
 
 thread_local! {
     static POPUP: RefCell<Option<PopupState>> = const { RefCell::new(None) };
+    static IN_MENU: Cell<bool> = const { Cell::new(false) };
 }
 
 const ITEM_H: i32 = 26;
@@ -650,10 +651,10 @@ pub unsafe extern "system" fn popup_proc(
             if x < 0 || y < 0 || x >= rc.right || y >= rc.bottom {
                 POPUP.with(|cell| {
                     if let Some(state) = cell.borrow_mut().as_mut() {
-                        state.chosen = 0;
+                        state.hover = usize::MAX;
                     }
                 });
-                DestroyWindow(hwnd);
+                InvalidateRect(hwnd, std::ptr::null(), 0);
                 return 0;
             }
             POPUP.with(|cell| {
@@ -667,10 +668,38 @@ pub unsafe extern "system" fn popup_proc(
             });
             0
         }
-        WM_LBUTTONUP => {
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN => {
+            // A click anywhere outside the menu dismisses it.
+            let x = (lparam as i32) as i16 as i32;
             let y = ((lparam as i32) >> 16) as i16 as i32;
+            let mut rc: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rc);
+            if x < 0 || y < 0 || x >= rc.right || y >= rc.bottom {
+                POPUP.with(|cell| {
+                    if let Some(state) = cell.borrow_mut().as_mut() {
+                        state.chosen = 0;
+                    }
+                });
+                DestroyWindow(hwnd);
+            }
+            0
+        }
+        WM_CAPTURECHANGED => {
+            DestroyWindow(hwnd);
+            0
+        }
+        WM_LBUTTONUP => {
+            let x = (lparam as i32) as i16 as i32;
+            let y = ((lparam as i32) >> 16) as i16 as i32;
+            let mut rc: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rc);
+            let inside = x >= 0 && y >= 0 && x < rc.right && y < rc.bottom;
             POPUP.with(|cell| {
                 if let Some(state) = cell.borrow_mut().as_mut() {
+                    if !inside {
+                        state.chosen = 0;
+                        return;
+                    }
                     if let Some(index) = popup_item_at(state, y) {
                         state.chosen = state.entries[index].id;
                     }
@@ -726,12 +755,18 @@ pub unsafe extern "system" fn popup_proc(
 }
 
 unsafe fn open_menu(owner: HWND, index: usize) -> usize {
+    // A nested menu loop inside another one would deadlock the thread.
+    if IN_MENU.with(|flag| flag.replace(true)) {
+        return 0;
+    }
     let entries = app::menu_entries(index);
     if entries.is_empty() {
+        IN_MENU.with(|flag| flag.set(false));
         return 0;
     }
     let hinst = GetModuleHandleW(std::ptr::null());
     let dpi = GetDpiForWindow(owner);
+    let main = GetParent(owner);
 
     let hdc = GetDC(owner);
     let mut width = scale(170, dpi);
@@ -761,6 +796,20 @@ unsafe fn open_menu(owner: HWND, index: usize) -> usize {
     };
     ClientToScreen(owner, &mut origin);
 
+    let popup_w = width + scale(4, dpi);
+    let mon = MonitorFromWindow(main, MONITOR_DEFAULTTONEAREST);
+    let mut mi: MONITORINFO = std::mem::zeroed();
+    mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    if GetMonitorInfoW(mon, &mut mi) != 0 {
+        let work = mi.rcWork;
+        if origin.x + popup_w > work.right {
+            origin.x = (work.right - popup_w).max(work.left);
+        }
+        if origin.y + height > work.bottom {
+            origin.y = (origin.y - height - scale(MENU_H, dpi)).max(work.top);
+        }
+    }
+
     POPUP.with(|cell| {
         *cell.borrow_mut() = Some(PopupState {
             entries,
@@ -772,7 +821,6 @@ unsafe fn open_menu(owner: HWND, index: usize) -> usize {
     });
 
     // Owned by the top-level window, not by a child control.
-    let main = GetParent(owner);
     let mut wclass = wide(POPUP_CLASS);
     let hwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
@@ -781,7 +829,7 @@ unsafe fn open_menu(owner: HWND, index: usize) -> usize {
         WS_POPUP | WS_VISIBLE,
         origin.x,
         origin.y,
-        width + scale(4, dpi),
+        popup_w,
         height,
         main,
         std::ptr::null_mut(),
@@ -789,6 +837,8 @@ unsafe fn open_menu(owner: HWND, index: usize) -> usize {
         std::ptr::null(),
     );
     if hwnd.is_null() {
+        POPUP.with(|cell| *cell.borrow_mut() = None);
+        IN_MENU.with(|flag| flag.set(false));
         return 0;
     }
 
@@ -799,7 +849,12 @@ unsafe fn open_menu(owner: HWND, index: usize) -> usize {
     let mut msg: MSG = std::mem::zeroed();
     while IsWindow(hwnd) != 0 {
         let r = GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0);
-        if r <= 0 {
+        if r == 0 {
+            // Never swallow a quit: the outer loop has to see it too.
+            PostQuitMessage(msg.wParam as i32);
+            break;
+        }
+        if r < 0 {
             break;
         }
         TranslateMessage(&msg);
@@ -808,12 +863,16 @@ unsafe fn open_menu(owner: HWND, index: usize) -> usize {
     if GetCapture() == hwnd {
         ReleaseCapture();
     }
-    SetActiveWindow(main);
+    if IsWindow(main) != 0 {
+        SetActiveWindow(main);
+        SetFocus(main);
+    }
 
     let chosen = POPUP
         .with(|cell| cell.borrow().as_ref().map(|s| s.chosen))
         .unwrap_or(0);
     POPUP.with(|cell| *cell.borrow_mut() = None);
+    IN_MENU.with(|flag| flag.set(false));
 
     if chosen != 0 {
         app::on_command(GetParent(owner), chosen);

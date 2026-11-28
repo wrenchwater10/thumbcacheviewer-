@@ -353,7 +353,12 @@ unsafe fn run_modal(owner: HWND, hwnd: HWND) {
             break;
         }
         let r = GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0);
-        if r <= 0 {
+        if r == 0 {
+            // Keep the quit for the application's own message loop.
+            PostQuitMessage(msg.wParam as i32);
+            break;
+        }
+        if r < 0 {
             break;
         }
         if msg.message == WM_KEYDOWN {
@@ -463,7 +468,7 @@ unsafe fn create_dialog_window(
         0,
         wide(SETTINGS_CLASS).as_ptr(),
         wtitle.as_mut_ptr(),
-        WS_POPUP | WS_VISIBLE,
+        WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN,
         x,
         y,
         w,
@@ -524,7 +529,7 @@ pub unsafe fn show_settings(owner: HWND, zoom_step: &mut f32) -> bool {
         wtext.as_mut_ptr(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL as u32,
         scale(16, dpi),
-        scale(44, dpi),
+        scale(44, dpi) + TITLE_OFFSET.with(|cell| cell.get()),
         scale(100, dpi),
         scale(24, dpi),
         hwnd,

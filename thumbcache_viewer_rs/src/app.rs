@@ -734,17 +734,18 @@ pub unsafe fn populate(hwnd: HWND) {
     });
     let count = with_app(|app| app.visible.len()).unwrap_or(0);
     grid::set_count(count);
+    if count == 0 {
+        with_app(|app| {
+            app.preview.set_message("No cache entries.");
+            app.refresh_status();
+        });
+    } else {
+        with_app(|app| app.refresh_status());
+    }
 }
 
 unsafe fn refresh_rows() {
     grid::invalidate();
-}
-
-unsafe fn select_row(row: i32) {
-    if row < 0 {
-        return;
-    }
-    grid::set_selection(&[row as usize]);
 }
 
 unsafe fn show_row(row: i32) {
@@ -859,7 +860,6 @@ pub unsafe fn open_files(hwnd: HWND, paths: &[PathBuf]) {
     }
 
     populate(hwnd);
-    select_row(0);
     show_row(0);
 
     let arrow = LoadCursorW(std::ptr::null_mut(), IDC_ARROW);
@@ -1003,7 +1003,6 @@ pub unsafe fn on_command(hwnd: HWND, id: usize) {
 
             with_app(|app| app.entries = keep);
             populate(hwnd);
-            select_row(0);
             show_row(0);
         }
         MENU_HIDE_BLANK => {

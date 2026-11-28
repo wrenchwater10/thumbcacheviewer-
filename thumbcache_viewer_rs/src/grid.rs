@@ -86,11 +86,12 @@ pub unsafe fn invalidate() {
 pub unsafe fn set_count(count: usize) {
     with_grid(|grid| {
         grid.count = count;
+        // A new dataset starts with nothing selected and scrolled to the top:
+        // no selection left over from the previous database, no stale offset.
         grid.selected.clear();
-        grid.top = grid.top.min(count.saturating_sub(1));
-        if grid.top + 1 > count {
-            grid.top = 0;
-        }
+        grid.drag = None;
+        grid.top = 0;
+        grid.scroll_x = 0;
         let hwnd = grid.hwnd;
         if !hwnd.is_null() {
             InvalidateRect(hwnd, std::ptr::null(), 0);
@@ -189,11 +190,13 @@ unsafe fn metrics(grid: &Grid, hwnd: HWND) -> Metrics {
     }
 }
 
-fn vbar_thumb(m: &Metrics, top: usize, count: usize) -> (i32, i32) {
+fn vbar_thumb(m: &Metrics, top: usize, count: usize, dpi: u32) -> (i32, i32) {
     let track = m.view_h.max(1);
     let total = (count as i32 * m.row_h).max(track);
-    let thumb = ((track as i64 * track as i64) / total as i64) as i32;
-    let thumb = thumb.clamp(scale(24, 96), track);
+    let raw = ((track as i64 * track as i64) / total as i64) as i32;
+    // max/min rather than clamp(): on a pane shorter than the minimum thumb
+    // clamp() would panic because min > max.
+    let thumb = raw.max(scale(24, dpi).min(track)).min(track);
     let max_top = count.saturating_sub(m.visible_rows.max(1)) as i64;
     let pos = if max_top == 0 {
         0
@@ -203,10 +206,10 @@ fn vbar_thumb(m: &Metrics, top: usize, count: usize) -> (i32, i32) {
     (thumb, pos)
 }
 
-fn hbar_thumb(m: &Metrics, scroll_x: i32) -> (i32, i32) {
+fn hbar_thumb(m: &Metrics, scroll_x: i32, dpi: u32) -> (i32, i32) {
     let track = m.view_w.max(1);
-    let thumb = ((track as i64 * track as i64) / m.total_w.max(1) as i64) as i32;
-    let thumb = thumb.clamp(scale(24, 96), track);
+    let raw = ((track as i64 * track as i64) / m.total_w.max(1) as i64) as i32;
+    let thumb = raw.max(scale(24, dpi).min(track)).min(track);
     let max_scroll = (m.total_w - m.view_w).max(1);
     let pos = ((scroll_x as i64 * (track - thumb) as i64) / max_scroll as i64) as i32;
     (thumb, pos.clamp(0, (track - thumb).max(0)))
@@ -351,7 +354,7 @@ unsafe fn paint(hwnd: HWND) {
         };
         theme::fill(hdc, &track, theme::PANEL);
         theme::vline(hdc, track.left, track.top, track.bottom, theme::BORDER);
-        let (thumb, pos) = vbar_thumb(&m, top, count);
+        let (thumb, pos) = vbar_thumb(&m, top, count, dpi);
         let thumb_rect = RECT {
             left: track.left + scale(2, dpi),
             top: track.top + pos,
@@ -369,7 +372,7 @@ unsafe fn paint(hwnd: HWND) {
         };
         theme::fill(hdc, &track, theme::PANEL);
         theme::hline(hdc, track.left, track.right, track.top, theme::BORDER);
-        let (thumb, pos) = hbar_thumb(&m, scroll_x);
+        let (thumb, pos) = hbar_thumb(&m, scroll_x, dpi);
         let thumb_rect = RECT {
             left: track.left + pos,
             top: track.top + scale(2, dpi),
@@ -454,7 +457,7 @@ pub unsafe extern "system" fn grid_proc(
             let Some((count, top, scroll_x, widths)) = snapshot else {
                 return 0;
             };
-            let mut grid = Grid {
+            let grid = Grid {
                 hwnd,
                 count,
                 top,
@@ -463,7 +466,7 @@ pub unsafe extern "system" fn grid_proc(
                 ..Default::default()
             };
             let m = metrics(&grid, hwnd);
-            let _ = &mut grid;
+            let dpi = GetDpiForWindow(hwnd);
 
             // Scrollbars first.
             if m.need_v {
@@ -474,7 +477,7 @@ pub unsafe extern "system" fn grid_proc(
                     bottom: m.header_h + m.view_h,
                 };
                 if x >= track.left {
-                    let (thumb, pos) = vbar_thumb(&m, top, count);
+                    let (thumb, pos) = vbar_thumb(&m, top, count, dpi);
                     if y >= track.top + pos && y < track.top + pos + thumb {
                         with_grid(|g| g.drag = Some(Drag::Vertical(y - (track.top + pos))));
                     } else if y >= track.top {
@@ -485,7 +488,7 @@ pub unsafe extern "system" fn grid_proc(
                 }
             }
             if m.need_h && y >= m.client.bottom - m.bar {
-                let (thumb, pos) = hbar_thumb(&m, scroll_x);
+                let (thumb, pos) = hbar_thumb(&m, scroll_x, dpi);
                 if x >= pos && x < pos + thumb {
                     with_grid(|g| g.drag = Some(Drag::Horizontal(x - pos)));
                 }
@@ -515,6 +518,7 @@ pub unsafe extern "system" fn grid_proc(
         WM_MOUSEMOVE => {
             let x = (lparam as i32) as i16 as i32;
             let y = ((lparam as i32) >> 16) as i16 as i32;
+            let dpi = GetDpiForWindow(hwnd);
             let drag = with_grid(|grid| grid.drag).flatten();
             match drag {
                 Some(Drag::Vertical(offset)) => {
@@ -527,7 +531,7 @@ pub unsafe extern "system" fn grid_proc(
                             ..Default::default()
                         };
                         let m = metrics(&grid, hwnd);
-                        let (thumb, _) = vbar_thumb(&m, 0, count);
+                        let (thumb, _) = vbar_thumb(&m, 0, count, dpi);
                         let span = (m.view_h - thumb).max(1);
                         let max_top = count.saturating_sub(m.visible_rows.max(1)) as i32;
                         let pos = (y - m.header_h - offset).clamp(0, span);
@@ -545,7 +549,7 @@ pub unsafe extern "system" fn grid_proc(
                             ..Default::default()
                         };
                         let m = metrics(&grid, hwnd);
-                        let (thumb, _) = hbar_thumb(&m, 0);
+                        let (thumb, _) = hbar_thumb(&m, 0, dpi);
                         let span = (m.view_w - thumb).max(1);
                         let max_scroll = (m.total_w - m.view_w).max(0);
                         let pos = (x - offset).clamp(0, span);
@@ -564,10 +568,19 @@ pub unsafe extern "system" fn grid_proc(
         }
         WM_KEYDOWN => {
             let key = wparam as u16;
-            let first = with_grid(|grid| grid.selected.iter().next().copied())
-                .flatten()
-                .unwrap_or(0);
-            let count = row_count();
+            let (first, top, count) =
+                with_grid(|grid| {
+                    (
+                        grid.selected.iter().next().copied(),
+                        grid.top,
+                        grid.count,
+                    )
+                })
+                .unwrap_or((None, 0, 0));
+            if count == 0 {
+                return 0;
+            }
+            let first = first.unwrap_or(top).min(count - 1);
             let target = match key {
                 VK_UP => Some(first.saturating_sub(1)),
                 VK_DOWN => Some((first + 1).min(count.saturating_sub(1))),
