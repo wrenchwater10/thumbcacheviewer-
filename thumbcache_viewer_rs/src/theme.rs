@@ -27,6 +27,10 @@ pub const ACCENT: u32 = rgb(0x2D, 0x7D, 0xD2);
 pub const FIELD: u32 = rgb(0x1E, 0x1E, 0x1E);
 pub const IMAGE_FRAME: u32 = rgb(0x0F, 0x0F, 0x0F);
 pub const SELECT: u32 = rgb(0x2E, 0x5F, 0x8E);
+pub const TITLE: u32 = rgb(0x1E, 0x1E, 0x1E);
+pub const ROW_ALT: u32 = rgb(0x2A, 0x2A, 0x2A);
+pub const SCROLL_THUMB: u32 = rgb(0x4A, 0x4A, 0x4A);
+pub const CLOSE_HOVER: u32 = rgb(0xC4, 0x2B, 0x1C);
 
 thread_local! {
     static BRUSHES: RefCell<Vec<(u32, HBRUSH)>> = const { RefCell::new(Vec::new()) };

@@ -60,6 +60,7 @@ pub struct Preview {
     pub width: u32,
     pub height: u32,
     pub scale: f32,
+    pub fit_mode: bool,
     pub zoom_step: f32,
     pub origin: (f32, f32),
     pub dragging: bool,
@@ -79,6 +80,7 @@ impl Preview {
             width: 0,
             height: 0,
             scale: 1.0,
+            fit_mode: true,
             zoom_step: 0.5,
             origin: (0.0, 0.0),
             dragging: false,
@@ -106,9 +108,9 @@ impl Preview {
         self.height = height;
         self.pixels = rgba;
         self.message.clear();
-        self.scale = 1.0;
         self.rebuild_dib();
-        self.center();
+        self.fit_mode = true;
+        self.fit();
         unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
     }
 
@@ -178,6 +180,11 @@ impl Preview {
     /// Keeps the image where the user left it and only re-centres it when it
     /// fits; avoids the jumpy, half-drawn frames resizing used to produce.
     pub fn on_resize(&mut self) {
+        if self.fit_mode {
+            self.fit();
+            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+            return;
+        }
         let (cw, ch) = self.client_size();
         if self.has_image() {
             let iw = self.width as f32 * self.scale;
@@ -194,9 +201,23 @@ impl Preview {
         unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
     }
 
-    pub fn reset_zoom(&mut self) {
-        self.scale = 1.0;
+    /// Scales the image down so the whole picture fits the pane, never enlarging
+    /// it beyond 100%, and keeps it fitted when the pane is resized.
+    pub fn fit(&mut self) {
+        let (cw, ch) = self.client_size();
+        if self.width == 0 || self.height == 0 || cw <= 8 || ch <= 8 {
+            self.center();
+            return;
+        }
+        let sx = cw as f32 / self.width as f32;
+        let sy = ch as f32 / self.height as f32;
+        self.scale = sx.min(sy).clamp(MIN_SCALE, 1.0);
         self.center();
+    }
+
+    pub fn reset_zoom(&mut self) {
+        self.fit_mode = true;
+        self.fit();
         unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
     }
 
@@ -215,6 +236,7 @@ impl Preview {
         if (new - old).abs() < 1e-6 {
             return;
         }
+        self.fit_mode = false;
         let k = new / old;
         self.origin.0 = anchor.0 - (anchor.0 - self.origin.0) * k;
         self.origin.1 = anchor.1 - (anchor.1 - self.origin.1) * k;
@@ -557,6 +579,7 @@ pub unsafe extern "system" fn preview_proc(
             SetFocus(hwnd);
             with_app(|app| {
                 app.preview.dragging = true;
+                app.preview.fit_mode = false;
                 app.preview.drag_start = (
                     (lparam as i32) as i16 as i32,
                     ((lparam as i32) >> 16) as i16 as i32,

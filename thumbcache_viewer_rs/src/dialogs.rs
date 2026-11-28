@@ -4,13 +4,22 @@
 
 use crate::theme;
 use crate::win::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 
 pub const SETTINGS_CLASS: &str = "tcv_settings";
 
 const IDOK: usize = 1;
 const IDCANCEL: usize = 2;
+
+/// Our own dark title strip inside the client area: the windows below have no
+/// native caption, so nothing light can appear at the top.
+const TITLE_H: i32 = 30;
+const CLOSE_W: i32 = 44;
+
+thread_local! {
+    static TITLE_OFFSET: Cell<i32> = const { Cell::new(0) };
+}
 
 const MODE_SETTINGS: u8 = 0;
 const MODE_ABOUT: u8 = 1;
@@ -212,12 +221,80 @@ pub unsafe extern "system" fn settings_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        WM_ERASEBKGND => {
-            let hdc: HDC = wparam as *mut core::ffi::c_void;
+        WM_ERASEBKGND => 1,
+        WM_PAINT => {
+            let mut ps: PAINTSTRUCT = std::mem::zeroed();
+            let hdc = BeginPaint(hwnd, &mut ps);
             let mut rc: RECT = std::mem::zeroed();
             GetClientRect(hwnd, &mut rc);
+            let dpi = GetDpiForWindow(hwnd);
+            let title_h = scale(TITLE_H, dpi);
+
             theme::fill(hdc, &rc, theme::PANEL);
-            1
+            theme::frame(hdc, &rc, theme::BORDER);
+
+            let bar = RECT {
+                left: 0,
+                top: 0,
+                right: rc.right,
+                bottom: title_h,
+            };
+            theme::fill(hdc, &bar, theme::TITLE);
+            theme::text_with_font(
+                hdc,
+                &get_text(hwnd),
+                RECT {
+                    left: scale(14, dpi),
+                    top: 0,
+                    right: rc.right - scale(CLOSE_W, dpi),
+                    bottom: title_h,
+                },
+                theme::TEXT,
+                dpi,
+                9,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+            );
+            let close = RECT {
+                left: rc.right - scale(CLOSE_W, dpi),
+                top: 0,
+                right: rc.right,
+                bottom: title_h,
+            };
+            for i in 0..8 {
+                let r = RECT {
+                    left: close.left + scale(18, dpi) + i,
+                    top: (title_h - 8) / 2 + i,
+                    right: close.left + scale(19, dpi) + i,
+                    bottom: (title_h - 8) / 2 + 1 + i,
+                };
+                theme::fill(hdc, &r, theme::TEXT);
+                let r = RECT {
+                    left: close.right - scale(26, dpi) - i,
+                    top: (title_h - 8) / 2 + i,
+                    right: close.right - scale(25, dpi) - i,
+                    bottom: (title_h - 8) / 2 + 1 + i,
+                };
+                theme::fill(hdc, &r, theme::TEXT);
+            }
+
+            EndPaint(hwnd, &ps);
+            0
+        }
+        WM_LBUTTONDOWN => {
+            let dpi = GetDpiForWindow(hwnd);
+            let x = (lparam as i32) as i16 as i32;
+            let y = ((lparam as i32) >> 16) as i16 as i32;
+            let mut rc: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rc);
+            if y < scale(TITLE_H, dpi) && x >= rc.right - scale(CLOSE_W, dpi) {
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            if y < scale(TITLE_H, dpi) {
+                let pos = GetMessagePos();
+                SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, pos as isize);
+            }
+            0
         }
         WM_CTLCOLORSTATIC => {
             let hdc: HDC = wparam as *mut core::ffi::c_void;
@@ -318,7 +395,7 @@ unsafe fn create_static(
         wtext.as_mut_ptr(),
         WS_CHILD | WS_VISIBLE | style,
         x,
-        y,
+        y + TITLE_OFFSET.with(|cell| cell.get()),
         w,
         h,
         parent,
@@ -353,7 +430,7 @@ unsafe fn create_button(
         wtext.as_mut_ptr(),
         style,
         x,
-        y,
+        y + TITLE_OFFSET.with(|cell| cell.get()),
         w,
         h,
         parent,
@@ -377,23 +454,27 @@ unsafe fn create_dialog_window(
     let x = rc.left + ((rc.right - rc.left) - w) / 2;
     let y = rc.top + ((rc.bottom - rc.top) - h) / 2;
 
+    let dpi = GetDpiForWindow(owner);
+    let offset = scale(TITLE_H, dpi);
+    TITLE_OFFSET.with(|cell| cell.set(offset));
+
     let mut wtitle = wide(title);
     let hwnd = CreateWindowExW(
-        WS_EX_DLGMODALFRAME,
+        0,
         wide(SETTINGS_CLASS).as_ptr(),
         wtitle.as_mut_ptr(),
-        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        WS_POPUP | WS_VISIBLE,
         x,
         y,
         w,
-        h,
+        h + offset,
         owner,
         std::ptr::null_mut(),
         hinst,
         std::ptr::null(),
     );
     if !hwnd.is_null() {
-        theme::enable_dark_mode(hwnd);
+        SetForegroundWindow(hwnd);
     }
     hwnd
 }

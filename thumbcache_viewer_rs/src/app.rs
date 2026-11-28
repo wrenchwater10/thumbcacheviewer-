@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use crate::chrome;
+use crate::grid;
 use crate::dialogs;
 use crate::preview::{self, Preview};
 use crate::save;
@@ -36,6 +37,80 @@ pub const MENU_ZOOM_IN: usize = 1020;
 pub const MENU_ZOOM_OUT: usize = 1021;
 pub const MENU_ZOOM_RESET: usize = 1022;
 
+pub const MENU_TITLES: [&str; 5] = ["File", "Edit", "View", "Tools", "Help"];
+
+pub struct MenuEntry {
+    pub label: &'static str,
+    pub accel: &'static str,
+    pub id: usize,
+    pub separator: bool,
+    pub checked: bool,
+}
+
+fn menu_item(label: &'static str, accel: &'static str, id: usize) -> MenuEntry {
+    MenuEntry {
+        label,
+        accel,
+        id,
+        separator: false,
+        checked: false,
+    }
+}
+
+fn menu_separator() -> MenuEntry {
+    MenuEntry {
+        label: "",
+        accel: "",
+        id: 0,
+        separator: true,
+        checked: false,
+    }
+}
+
+/// Entries of one of the custom popup menus (0 = File ... 4 = Help).
+pub fn menu_entries(index: usize) -> Vec<MenuEntry> {
+    let (hide_blank, checksums) =
+        with_app(|app| (app.hide_blank, app.show_checksums)).unwrap_or((false, true));
+    match index {
+        0 => vec![
+            menu_item("Open...", "Ctrl+O", MENU_OPEN),
+            menu_item("Save All...", "", MENU_SAVE_ALL),
+            menu_item("Save Selected...", "", MENU_SAVE_SEL),
+            menu_item("Export List as CSV...", "", MENU_EXPORT),
+            menu_separator(),
+            menu_item("Exit", "", MENU_EXIT),
+        ],
+        1 => vec![
+            menu_item("Copy Selected", "", MENU_COPY_SEL),
+            menu_item("Select All", "", MENU_SELECT_ALL),
+            menu_separator(),
+            menu_item("Remove Selected", "", MENU_REMOVE_SEL),
+        ],
+        2 => vec![
+            MenuEntry {
+                checked: hide_blank,
+                ..menu_item("Hide Blank Entries", "", MENU_HIDE_BLANK)
+            },
+            MenuEntry {
+                checked: checksums,
+                ..menu_item("Show Checksum Columns", "", MENU_CHECKSUMS)
+            },
+            menu_separator(),
+            menu_item("Zoom In", "Ctrl++", MENU_ZOOM_IN),
+            menu_item("Zoom Out", "Ctrl+-", MENU_ZOOM_OUT),
+            menu_item("Fit to Window", "Ctrl+0", MENU_ZOOM_RESET),
+        ],
+        3 => vec![
+            menu_item("Copy Image", "", MENU_COPY_IMAGE),
+            menu_item("Export Image...", "", MENU_EXPORT_IMAGE),
+            menu_separator(),
+            menu_item("Settings...", "", MENU_SETTINGS),
+            menu_item("Home Page", "", MENU_HOME_PAGE),
+        ],
+        _ => vec![menu_item("About", "", MENU_ABOUT)],
+    }
+}
+
 pub const COLUMNS: [&str; NUM_COLUMNS] = [
     "#",
     "Filename",
@@ -54,7 +129,8 @@ const COL_WIDTHS: [i32; NUM_COLUMNS] = [50, 260, 130, 110, 100, 90, 150, 150, 15
 
 pub struct App {
     pub hwnd: HWND,
-    pub list: HWND,
+    pub grid: HWND,
+    pub top: HWND,
     pub splitter: HWND,
     pub preview: Preview,
     pub entries: Vec<Entry>,
@@ -66,7 +142,6 @@ pub struct App {
     pub dpi: u32,
     pub preview_width: i32,
     pub col_fmt: [u8; NUM_COLUMNS],
-    pub toolbar: HWND,
     pub list_bar: HWND,
     pub preview_bar: HWND,
     pub status: HWND,
@@ -89,7 +164,7 @@ impl App {
             String::from("No image")
         };
         let count = self.visible.len();
-        let selected = unsafe { SendMessageW(self.list, LVM_GETSELECTEDCOUNT, 0, 0) } as usize;
+        let selected = grid::selected_count();
         let mut right = if count == 1 {
             String::from("1 entry")
         } else {
@@ -189,11 +264,11 @@ pub unsafe fn create(hwnd: HWND, cmd_line: &CommandLine) {
     let dpi = GetDpiForWindow(hwnd);
     let hinst = GetModuleHandleW(std::ptr::null());
 
-    let list = CreateWindowExW(
+    let grid_hwnd = CreateWindowExW(
         0,
-        wide(WC_LISTVIEWW).as_ptr(),
+        wide(grid::GRID_CLASS).as_ptr(),
         wide("").as_ptr(),
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | LVS_REPORT | LVS_SHOWSELALWAYS as u32,
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
         0,
         0,
         0,
@@ -204,43 +279,26 @@ pub unsafe fn create(hwnd: HWND, cmd_line: &CommandLine) {
         std::ptr::null(),
     );
 
-    SendMessageW(
-        list,
-        LVM_SETEXTENDEDLISTVIEWSTYLE,
-        (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as usize,
-        (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as isize,
+    let mut col_widths = [0i32; NUM_COLUMNS];
+    for (i, width) in COL_WIDTHS.iter().enumerate() {
+        col_widths[i] = scale(*width, dpi);
+    }
+    grid::init(grid_hwnd, col_widths);
+
+    let top = CreateWindowExW(
+        0,
+        wide(chrome::TOP_CLASS).as_ptr(),
+        wide(PROGRAM_CAPTION).as_ptr(),
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        0,
+        0,
+        0,
+        0,
+        hwnd,
+        std::ptr::null_mut(),
+        hinst,
+        std::ptr::null(),
     );
-
-    // Dark list: Explorer dark theme for its scrollbars, our own colours and a
-    // custom drawn header and rows (so the system selection colour never shows).
-    SendMessageW(list, LVM_SETBKCOLOR, 0, theme::PANEL as isize);
-    SendMessageW(list, LVM_SETTEXTCOLOR, 0, theme::TEXT as isize);
-    SendMessageW(list, LVM_SETTEXTBKCOLOR, 0, theme::PANEL as isize);
-    theme::darken_control(list);
-    theme::darken_scrollbars(list);
-    let header = SendMessageW(list, LVM_GETHEADER, 0, 0) as HWND;
-    if !header.is_null() {
-        theme::untheme(header);
-    }
-    install_list_subclass(list);
-
-    for (i, name) in COLUMNS.iter().enumerate() {
-        let mut text = wide(name);
-        let mut col = LvColumn {
-            mask: LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM,
-            fmt: LVCFMT_LEFT,
-            cx: scale(COL_WIDTHS[i], dpi),
-            pszText: text.as_mut_ptr(),
-            cchTextMax: 0,
-            iSubItem: i as i32,
-            iImage: 0,
-            iOrder: 0,
-            cxMin: 0,
-            cxDefault: 0,
-            cxIdeal: 0,
-        };
-        SendMessageW(list, LVM_INSERTCOLUMNW, i, &mut col as *mut _ as isize);
-    }
 
     let splitter = CreateWindowExW(
         0,
@@ -260,21 +318,6 @@ pub unsafe fn create(hwnd: HWND, cmd_line: &CommandLine) {
     let preview_hwnd = CreateWindowExW(
         0,
         wide(preview::PREVIEW_CLASS).as_ptr(),
-        wide("").as_ptr(),
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-        0,
-        0,
-        0,
-        0,
-        hwnd,
-        std::ptr::null_mut(),
-        hinst,
-        std::ptr::null(),
-    );
-
-    let toolbar = CreateWindowExW(
-        0,
-        wide(chrome::TOOLBAR_CLASS).as_ptr(),
         wide("").as_ptr(),
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
         0,
@@ -340,7 +383,8 @@ pub unsafe fn create(hwnd: HWND, cmd_line: &CommandLine) {
 
     let app = App {
         hwnd,
-        list,
+        grid: grid_hwnd,
+        top,
         splitter,
         preview,
         entries: Vec::new(),
@@ -352,7 +396,6 @@ pub unsafe fn create(hwnd: HWND, cmd_line: &CommandLine) {
         dpi,
         preview_width: saved.preview_width,
         col_fmt: [0; NUM_COLUMNS],
-        toolbar,
         list_bar,
         preview_bar,
         status,
@@ -395,9 +438,8 @@ pub unsafe fn layout(hwnd: HWND) {
         let min_preview = scale(100, app.dpi);
 
         if app.preview_width < 0 {
-            app.preview_width = (cw * 60) / 100;
+            app.preview_width = (cw * 62) / 100;
         }
-
         let max_preview = (cw - min_list - SPLITTER_WIDTH).max(min_preview);
         if app.preview_width > max_preview {
             app.preview_width = max_preview;
@@ -407,11 +449,11 @@ pub unsafe fn layout(hwnd: HWND) {
         }
 
         (
-            app.list,
+            app.grid,
             app.splitter,
             app.preview.hwnd,
             app.preview_width,
-            app.toolbar,
+            app.top,
             app.list_bar,
             app.preview_bar,
             app.status,
@@ -419,15 +461,12 @@ pub unsafe fn layout(hwnd: HWND) {
         )
     });
 
-    // The borrow is released before any window is moved: SetWindowPos sends
-    // WM_SIZE synchronously and the panes handle it through with_app, which
-    // cannot re-enter while the app is already borrowed.
     let Some((
-        list,
+        grid_hwnd,
         splitter,
         preview_hwnd,
         preview_w,
-        toolbar,
+        top,
         list_bar,
         preview_bar,
         status,
@@ -437,25 +476,23 @@ pub unsafe fn layout(hwnd: HWND) {
         return;
     };
 
-    let tool_h = scale(chrome::TOOLBAR_HEIGHT, dpi);
-    let bar_h = scale(chrome::PANELBAR_HEIGHT, dpi);
-    let status_h = scale(chrome::STATUS_HEIGHT, dpi);
-    let content_h = (ch - tool_h - status_h).max(0);
+    let top_h = chrome::top_height(dpi);
+    let bar_h = scale(chrome::PANELBAR_H, dpi);
+    let status_h = scale(chrome::STATUS_H, dpi);
+    let content_h = (ch - top_h - status_h).max(0);
     let pane_h = (content_h - bar_h).max(0);
     let list_w = (cw - preview_w - SPLITTER_WIDTH).max(0);
     let preview_x = list_w + SPLITTER_WIDTH;
-    let pane_y = tool_h + bar_h;
+    let pane_y = top_h + bar_h;
 
-    // Move all three children in one transaction so that a resize never
-    // draws a half-moved frame where the panes overlap.
     let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS;
     let mut hdwp = BeginDeferWindowPos(7);
     if !hdwp.is_null() {
-        hdwp = DeferWindowPos(hdwp, toolbar, std::ptr::null_mut(), 0, 0, cw, tool_h, flags);
-        hdwp = DeferWindowPos(hdwp, list_bar, std::ptr::null_mut(), 0, tool_h, list_w, bar_h, flags);
+        hdwp = DeferWindowPos(hdwp, top, std::ptr::null_mut(), 0, 0, cw, top_h, flags);
+        hdwp = DeferWindowPos(hdwp, list_bar, std::ptr::null_mut(), 0, top_h, list_w, bar_h, flags);
         hdwp = DeferWindowPos(
             hdwp,
-            list,
+            grid_hwnd,
             std::ptr::null_mut(),
             0,
             pane_y,
@@ -468,7 +505,7 @@ pub unsafe fn layout(hwnd: HWND) {
             splitter,
             std::ptr::null_mut(),
             list_w,
-            tool_h,
+            top_h,
             SPLITTER_WIDTH,
             content_h,
             flags,
@@ -478,7 +515,7 @@ pub unsafe fn layout(hwnd: HWND) {
             preview_bar,
             std::ptr::null_mut(),
             preview_x,
-            tool_h,
+            top_h,
             preview_w,
             bar_h,
             flags,
@@ -505,11 +542,11 @@ pub unsafe fn layout(hwnd: HWND) {
         );
         EndDeferWindowPos(hdwp);
     } else {
-        MoveWindow(toolbar, 0, 0, cw, tool_h, 0);
-        MoveWindow(list_bar, 0, tool_h, list_w, bar_h, 0);
-        MoveWindow(list, 0, pane_y, list_w, pane_h, 0);
-        MoveWindow(splitter, list_w, tool_h, SPLITTER_WIDTH, content_h, 0);
-        MoveWindow(preview_bar, preview_x, tool_h, preview_w, bar_h, 0);
+        MoveWindow(top, 0, 0, cw, top_h, 0);
+        MoveWindow(list_bar, 0, top_h, list_w, bar_h, 0);
+        MoveWindow(grid_hwnd, 0, pane_y, list_w, pane_h, 0);
+        MoveWindow(splitter, list_w, top_h, SPLITTER_WIDTH, content_h, 0);
+        MoveWindow(preview_bar, preview_x, top_h, preview_w, bar_h, 0);
         MoveWindow(preview_hwnd, preview_x, pane_y, preview_w, pane_h, 0);
         MoveWindow(status, 0, ch - status_h, cw, status_h, 0);
     }
@@ -517,18 +554,15 @@ pub unsafe fn layout(hwnd: HWND) {
     repaint_frame(
         hwnd,
         &[
-            toolbar,
+            top,
             list_bar,
-            list,
+            grid_hwnd,
             splitter,
             preview_bar,
             preview_hwnd,
             status,
         ],
     );
-
-    // Scrollbars are created on demand, so re-theme them after each layout.
-    theme::darken_scrollbars(list);
 }
 
 /// Repaints the frame and every pane synchronously, bottom of the z-order first.
@@ -689,115 +723,28 @@ unsafe fn set_subitem(list: HWND, row: i32, col: i32, text: &str) {
 pub unsafe fn populate(hwnd: HWND) {
     let _ = hwnd;
     with_app(|app| {
-        let list = app.list;
-        app.populating = true;
-        SendMessageW(list, LVM_DELETEALLITEMS, 0, 0);
-
         app.visible.clear();
-        for (i, e) in app.entries.iter().enumerate() {
-            if app.hide_blank && e.data_size == 0 {
+        for (i, entry) in app.entries.iter().enumerate() {
+            if app.hide_blank && entry.data_size == 0 {
                 continue;
             }
             app.visible.push(i);
         }
-
-        for (row, &idx) in app.visible.iter().enumerate() {
-            let e = &app.entries[idx];
-            let mut first = wide(&text_for(app, 0, row, e));
-            let mut item = LvItem {
-                mask: LVIF_PARAM | LVIF_TEXT,
-                iItem: row as i32,
-                iSubItem: 0,
-                state: 0,
-                stateMask: 0,
-                pszText: first.as_mut_ptr(),
-                cchTextMax: first.len() as i32,
-                iImage: 0,
-                lParam: idx as isize,
-                iIndent: 0,
-                iGroupId: 0,
-                cColumns: 0,
-                puColumns: std::ptr::null_mut(),
-                piColFmt: std::ptr::null_mut(),
-                iGroup: -1,
-            };
-            SendMessageW(list, LVM_INSERTITEMW, 0, &mut item as *mut _ as isize);
-            for col in 1..NUM_COLUMNS {
-                set_subitem(list, row as i32, col as i32, &text_for(app, col, row, e));
-            }
-        }
-
-        // Nothing may start out tinted: clear every selected and focused flag
-        // before the caller picks the row it actually wants.
-        let mut clear = LvItem {
-            mask: LVIF_STATE,
-            iItem: -1,
-            iSubItem: 0,
-            state: 0,
-            stateMask: LVIS_SELECTED | LVIS_FOCUSED,
-            pszText: std::ptr::null_mut(),
-            cchTextMax: 0,
-            iImage: 0,
-            lParam: 0,
-            iIndent: 0,
-            iGroupId: 0,
-            cColumns: 0,
-            puColumns: std::ptr::null_mut(),
-            piColFmt: std::ptr::null_mut(),
-            iGroup: -1,
-        };
-        SendMessageW(
-            list,
-            LVM_SETITEMSTATE,
-            usize::MAX,
-            &mut clear as *mut LvItem as isize,
-        );
-
-        app.populating = false;
         app.refresh_status();
-        theme::darken_scrollbars(list);
     });
+    let count = with_app(|app| app.visible.len()).unwrap_or(0);
+    grid::set_count(count);
 }
 
 unsafe fn refresh_rows() {
-    with_app(|app| {
-        let list = app.list;
-        for (row, &idx) in app.visible.iter().enumerate() {
-            for col in 0..NUM_COLUMNS {
-                set_subitem(list, row as i32, col as i32, &text_for(app, col, row, &app.entries[idx]));
-            }
-        }
-        InvalidateRect(list, std::ptr::null(), 0);
-    });
+    grid::invalidate();
 }
 
 unsafe fn select_row(row: i32) {
-    with_app(|app| {
-        let mut item = LvItem {
-            mask: LVIF_STATE,
-            iItem: row,
-            iSubItem: 0,
-            state: LVIS_SELECTED | LVIS_FOCUSED,
-            stateMask: LVIS_SELECTED | LVIS_FOCUSED,
-            pszText: std::ptr::null_mut(),
-            cchTextMax: 0,
-            iImage: 0,
-            lParam: 0,
-            iIndent: 0,
-            iGroupId: 0,
-            cColumns: 0,
-            puColumns: std::ptr::null_mut(),
-            piColFmt: std::ptr::null_mut(),
-            iGroup: -1,
-        };
-        SendMessageW(
-            app.list,
-            LVM_SETITEMSTATE,
-            row as usize,
-            &mut item as *mut _ as isize,
-        );
-        SendMessageW(app.list, LVM_ENSUREVISIBLE, row as usize, 0);
-    });
+    if row < 0 {
+        return;
+    }
+    grid::set_selection(&[row as usize]);
 }
 
 unsafe fn show_row(row: i32) {
@@ -852,220 +799,40 @@ unsafe fn show_row(row: i32) {
     }
 }
 
-pub unsafe fn on_notify(lp: LPARAM) -> LRESULT {
-    let hdr = &*(lp as *const Nmhdr);
-    match hdr.code {
-        LVN_ITEMCHANGED => {
-            let nm = &*(lp as *const Nmlistview);
-            let populating = with_app(|app| app.populating).unwrap_or(true);
-            if !populating
-                && (nm.uNewState & LVIS_FOCUSED) != 0
-                && (nm.uOldState & LVIS_FOCUSED) == 0
-            {
-                show_row(nm.iItem);
-            }
-            if !populating && (nm.uChanged & LVIF_STATE) != 0 {
-                with_app(|app| app.refresh_status());
-            }
-            0
+pub fn on_selection_changed() {
+    let first = grid::with_grid(|grid| grid.first_selected()).flatten();
+    unsafe {
+        if let Some(row) = first {
+            show_row(row as i32);
         }
-        LVN_COLUMNCLICK => {
-            let nm = &*(lp as *const Nmcolumnclick);
-            let col = nm.iSubItem as usize;
-            if (2..=5).contains(&col) {
-                with_app(|app| app.col_fmt[col] = (app.col_fmt[col] + 1) % 3);
-            } else if (6..=8).contains(&col) {
-                with_app(|app| app.col_fmt[col] = (app.col_fmt[col] + 1) % 2);
-            }
-            refresh_rows();
-            0
-        }
-        NM_CUSTOMDRAW => {
-            let draw = &mut *(lp as *mut Nmlvcustomdraw);
-            list_custom_draw(draw)
-        }
-        _ => 0,
+        with_app(|app| app.refresh_status());
     }
 }
 
-/// Custom draws the dark list rows: dark background, light text and an accent
-/// coloured selection instead of the system highlight.
-fn list_custom_draw(draw: &mut Nmlvcustomdraw) -> LRESULT {
-    match draw.nmcd.dwDrawStage {
-        CDDS_PREPAINT => {
-            draw.clrText = theme::TEXT;
-            draw.clrTextBk = theme::PANEL;
-            CDRF_NOTIFYITEMDRAW
+pub unsafe fn cycle_column_format(col: usize) {
+    with_app(|app| {
+        if (2..=5).contains(&col) {
+            app.col_fmt[col] = (app.col_fmt[col] + 1) % 3;
+        } else if (6..=8).contains(&col) {
+            app.col_fmt[col] = (app.col_fmt[col] + 1) % 2;
         }
-        CDDS_ITEMPREPAINT => unsafe { draw_list_row(draw) },
-        _ => CDRF_DODEFAULT,
-    }
+    });
+    grid::invalidate();
 }
 
-/// Paints a whole list row by hand: background, every cell's text and the
-/// selection colour. The control's own item painting is skipped, which is what
-/// keeps the blue system highlight from appearing on rows nobody selected.
-unsafe fn draw_list_row(draw: &mut Nmlvcustomdraw) -> LRESULT {
-    let list = draw.nmcd.hdr.hwndFrom;
-    let hdc = draw.nmcd.hdc;
-    let row = draw.nmcd.dwItemSpec as i32;
-    let selected = (draw.nmcd.uItemState & CDIS_SELECTED) != 0;
-    let dpi = GetDpiForWindow(list);
-
-    let mut client: RECT = std::mem::zeroed();
-    GetClientRect(list, &mut client);
-
-    let mut bounds = RECT {
-        left: LVIR_BOUNDS,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    if SendMessageW(
-        list,
-        LVM_GETITEMRECT,
-        row as usize,
-        &mut bounds as *mut RECT as isize,
-    ) == 0
-    {
-        return CDRF_SKIPDEFAULT;
-    }
-    bounds.left = 0;
-    bounds.right = client.right;
-    theme::fill(
-        hdc,
-        &bounds,
-        if selected {
-            theme::SELECT
-        } else {
-            theme::PANEL
-        },
-    );
-
-    let cells: Vec<String> = with_app(|app| {
-        if row < 0 || row as usize >= app.visible.len() {
-            return Vec::new();
-        }
-        let index = app.visible[row as usize];
-        (0..NUM_COLUMNS)
-            .map(|col| text_for(app, col, row as usize, &app.entries[index]))
-            .collect()
-    })
-    .unwrap_or_default();
-
-    let color = if selected {
-        theme::TEXT_BRIGHT
-    } else {
-        theme::TEXT
-    };
-
-    for col in 0..NUM_COLUMNS {
-        let Some(text) = cells.get(col) else {
-            continue;
-        };
-        if text.is_empty() {
-            continue;
-        }
-        let mut cell = RECT {
-            left: LVIR_BOUNDS,
-            top: col as i32,
-            right: 0,
-            bottom: 0,
-        };
-        if SendMessageW(
-            list,
-            LVM_GETSUBITEMRECT,
-            row as usize,
-            &mut cell as *mut RECT as isize,
-        ) == 0
-        {
-            continue;
-        }
-        cell.left += scale(6, dpi);
-        cell.right -= scale(4, dpi);
-        theme::text_with_font(
-            hdc,
-            text,
-            cell,
-            color,
-            dpi,
-            9,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+/// Text for every column of a row range, in one app borrow.
+pub fn row_texts(app: &App, first: usize, last: usize) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    for row in first..last.min(app.visible.len()) {
+        let index = app.visible[row];
+        let entry = &app.entries[index];
+        rows.push(
+            (0..NUM_COLUMNS)
+                .map(|col| text_for(app, col, row, entry))
+                .collect(),
         );
     }
-
-    CDRF_SKIPDEFAULT
-}
-
-// ------------------------------------------------------------- list subclass
-
-static mut OLD_LIST_PROC: WNDPROC = None;
-
-/// The column header sends its custom draw notification to the listview, which
-/// does not forward it, so the listview is subclassed to paint the header dark.
-unsafe extern "system" fn list_subclass(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    if msg == WM_NOTIFY {
-        let hdr = &*(lparam as *const Nmhdr);
-        if hdr.code == NM_CUSTOMDRAW {
-            let draw = &mut *(lparam as *mut Nmcustomdraw);
-            match draw.dwDrawStage {
-                CDDS_PREPAINT => {
-                    theme::fill(draw.hdc, &draw.rc, theme::HEADER);
-                    return CDRF_NOTIFYITEMDRAW;
-                }
-                CDDS_ITEMPREPAINT => {
-                    header_item(draw);
-                    return CDRF_SKIPDEFAULT;
-                }
-                _ => {}
-            }
-        }
-    }
-    CallWindowProcW(OLD_LIST_PROC, hwnd, msg, wparam, lparam)
-}
-
-/// The header has no coloured-text custom draw fields, so each column title is
-/// painted here instead: dark cell, light label and a hairline separator.
-unsafe fn header_item(draw: &Nmcustomdraw) {
-    theme::fill(draw.hdc, &draw.rc, theme::HEADER);
-
-    let dpi = GetDpiForWindow(draw.hdr.hwndFrom);
-    if let Some(title) = COLUMNS.get(draw.dwItemSpec) {
-        let mut rc = draw.rc;
-        rc.left += scale(8, dpi);
-        rc.right -= scale(6, dpi);
-        theme::text_with_font(
-            draw.hdc,
-            title,
-            rc,
-            theme::TEXT,
-            dpi,
-            9,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
-        );
-    }
-    theme::vline(
-        draw.hdc,
-        draw.rc.right - 1,
-        draw.rc.top,
-        draw.rc.bottom,
-        theme::BORDER,
-    );
-}
-
-unsafe fn install_list_subclass(list: HWND) {
-    let previous = GetWindowLongPtrW(list, INDEX_WNDPROC);
-    OLD_LIST_PROC = std::mem::transmute::<isize, WNDPROC>(previous);
-    SetWindowLongPtrW(
-        list,
-        INDEX_WNDPROC,
-        list_subclass as *const () as usize as isize,
-    );
+    rows
 }
 
 // ---------------------------------------------------------------- file handling
@@ -1107,17 +874,15 @@ pub unsafe fn open_files(hwnd: HWND, paths: &[PathBuf]) {
 }
 
 unsafe fn selected_entries() -> Vec<Entry> {
+    let rows = grid::selected_rows();
     with_app(|app| {
-        let mut out = Vec::new();
-        let mut idx = SendMessageW(app.list, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize);
-        while idx >= 0 {
-            let row = idx as usize;
-            if let Some(&entry_idx) = app.visible.get(row) {
-                out.push(app.entries[entry_idx].clone());
-            }
-            idx = SendMessageW(app.list, LVM_GETNEXTITEM, idx as usize, LVNI_SELECTED as isize);
-        }
-        out
+        rows.iter()
+            .filter_map(|&row| {
+                app.visible
+                    .get(row)
+                    .map(|&index| app.entries[index].clone())
+            })
+            .collect()
     })
     .unwrap_or_default()
 }
@@ -1216,50 +981,16 @@ pub unsafe fn on_command(hwnd: HWND, id: usize) {
             save::copy_text_to_clipboard(hwnd, &text);
         }
         MENU_SELECT_ALL => {
-            with_app(|app| {
-                let count = SendMessageW(app.list, LVM_GETITEMCOUNT, 0, 0) as i32;
-                for row in 0..count {
-                    let mut item = LvItem {
-                        mask: LVIF_STATE,
-                        iItem: row,
-                        iSubItem: 0,
-                        state: LVIS_SELECTED,
-                        stateMask: LVIS_SELECTED,
-                        pszText: std::ptr::null_mut(),
-                        cchTextMax: 0,
-                        iImage: 0,
-                        lParam: 0,
-                        iIndent: 0,
-                        iGroupId: 0,
-                        cColumns: 0,
-                        puColumns: std::ptr::null_mut(),
-                        piColFmt: std::ptr::null_mut(),
-                        iGroup: -1,
-                    };
-                    SendMessageW(
-                        app.list,
-                        LVM_SETITEMSTATE,
-                        row as usize,
-                        &mut item as *mut _ as isize,
-                    );
-                }
-            });
+            grid::select_all();
         }
         MENU_REMOVE_SEL => {
+            let rows = grid::selected_rows();
             let keep: Vec<Entry> = with_app(|app| {
                 let mut remove = std::collections::HashSet::new();
-                let mut idx =
-                    SendMessageW(app.list, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize);
-                while idx >= 0 {
-                    if let Some(&entry_idx) = app.visible.get(idx as usize) {
-                        remove.insert(entry_idx);
+                for row in &rows {
+                    if let Some(&index) = app.visible.get(*row) {
+                        remove.insert(index);
                     }
-                    idx = SendMessageW(
-                        app.list,
-                        LVM_GETNEXTITEM,
-                        idx as usize,
-                        LVNI_SELECTED as isize,
-                    );
                 }
                 app.entries
                     .iter()
@@ -1272,6 +1003,7 @@ pub unsafe fn on_command(hwnd: HWND, id: usize) {
 
             with_app(|app| app.entries = keep);
             populate(hwnd);
+            select_row(0);
             show_row(0);
         }
         MENU_HIDE_BLANK => {

@@ -8,6 +8,7 @@
 mod app;
 mod chrome;
 mod dialogs;
+mod grid;
 mod preview;
 mod save;
 mod settings;
@@ -66,9 +67,8 @@ unsafe extern "system" fn main_proc(
             app::on_command(hwnd, id);
             0
         }
-        WM_NOTIFY => app::on_notify(lparam),
         WM_SETFOCUS => {
-            if let Some(list) = app::with_app(|a| a.list) {
+            if let Some(list) = app::with_app(|a| a.grid) {
                 SetFocus(list);
             }
             0
@@ -203,10 +203,26 @@ fn main() {
             )
             && register_class(
                 hinst,
-                chrome::TOOLBAR_CLASS,
-                Some(chrome::toolbar_proc),
+                chrome::TOP_CLASS,
+                Some(chrome::top_proc),
                 arrow,
                 toolbar_brush,
+                icon,
+            )
+            && register_class(
+                hinst,
+                chrome::POPUP_CLASS,
+                Some(chrome::popup_proc),
+                arrow,
+                panel_brush,
+                icon,
+            )
+            && register_class(
+                hinst,
+                grid::GRID_CLASS,
+                Some(grid::grid_proc),
+                arrow,
+                panel_brush,
                 icon,
             )
             && register_class(
@@ -235,21 +251,22 @@ fn main() {
             return;
         }
 
-        let menu = app::build_menu();
         let mut caption = wide(PROGRAM_CAPTION);
         let mut class_name = wide(MAIN_CLASS);
 
+        // Popup frame with a resize border but no caption and no menu: our own
+        // dark title bar, menu bar and option bar live inside the client area.
         let hwnd = CreateWindowExW(
-            0,
+            WS_EX_APPWINDOW,
             class_name.as_mut_ptr(),
             caption.as_mut_ptr(),
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+            WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             1080,
             720,
             std::ptr::null_mut(),
-            menu,
+            std::ptr::null_mut(),
             hinst,
             std::ptr::null(),
         );

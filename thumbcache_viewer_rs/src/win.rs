@@ -84,6 +84,7 @@ pub const CDRF_SKIPDEFAULT: isize = 0x0000_0004;
 pub const CDRF_NOTIFYITEMDRAW: isize = 0x0000_0020;
 pub const CDIS_SELECTED: u32 = 0x0000_0001;
 pub const INDEX_WNDPROC: i32 = -4;
+pub const INDEX_STYLE: i32 = -16;
 
 // Static control styles (SS_LEFT is zero, so it is spelled out here).
 pub const SS_TEXT_LEFT: u32 = 0x0000_0000;
